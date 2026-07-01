@@ -5,7 +5,6 @@
 }
 
 .topbar,
-.headline,
 .workspace,
 .feedbackPanel,
 .metric,
@@ -155,27 +154,6 @@
   color: var(--blue);
 }
 
-.headline {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  margin-top: 18px;
-  padding: 30px;
-  border-radius: 8px;
-  overflow: hidden;
-  position: relative;
-}
-
-.headline::after {
-  content: "";
-  position: absolute;
-  inset: auto 28px 0 auto;
-  width: 330px;
-  height: 4px;
-  background: linear-gradient(90deg, var(--blue), var(--green), #e1a72e);
-}
-
 .eyebrow {
   margin: 0 0 8px;
   color: var(--green);
@@ -317,11 +295,6 @@ h2 {
 }
 
 .homeSectionTitle {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
 }
@@ -774,7 +747,6 @@ h2 {
   }
 
   .topbar,
-  .headline,
   .uploadPanel,
   .translationMeta {
     grid-template-columns: 1fr;
@@ -786,14 +758,12 @@ h2 {
   }
 
   .nav,
-  .adminControls,
-  .headline {
+  .adminControls {
     justify-content: stretch;
   }
 
   .nav button,
-  .adminControls button,
-  .headline .primary {
+  .adminControls button {
     flex: 1;
   }
 
@@ -819,7 +789,6 @@ h2 {
   }
 
   .topbar,
-  .headline,
   .workspace,
   .feedbackPanel,
   .homeSection {

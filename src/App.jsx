@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Activity,
   Bot,
@@ -69,13 +69,6 @@ function App() {
     setNotice('管理员已退出')
   }
 
-  const title = useMemo(() => {
-    if (view === 'qa') return '制造一厂知识问答'
-    if (view === 'translate') return '文档翻译助手'
-    if (view === 'admin') return '管理控制台'
-    return 'AI助手服务台'
-  }, [view])
-
   return (
     <main className="shell">
       <header className="topbar">
@@ -100,6 +93,9 @@ function App() {
         </nav>
 
         <div className="adminControls">
+          <button className="primary" type="button" onClick={() => setFeedbackOpen(true)}>
+            <MessageSquare size={18} /> 问题反馈
+          </button>
           {me.isAdmin ? (
             <>
               <button className={view === 'admin' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('admin')}>
@@ -123,16 +119,6 @@ function App() {
           <button type="button" onClick={() => setNotice('')}>关闭</button>
         </div>
       )}
-
-      <section className="headline">
-        <div>
-          <p className="eyebrow">AI助手服务台</p>
-          <h1>{title}</h1>
-        </div>
-        <button className="primary" type="button" onClick={() => setFeedbackOpen(true)}>
-          <MessageSquare size={18} /> 问题反馈
-        </button>
-      </section>
 
       {view === 'home' && (
         <HomeView
@@ -189,7 +175,7 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
             <span className="assistantIcon"><Bot size={26} /></span>
             <span>
               <strong>制造一厂知识问答AI助手</strong>
-              <small>连接既有知识问答接口，面向制造现场与业务知识查询。</small>
+              <small>知识来源为云盘内相关文档。</small>
             </span>
           </button>
           <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
@@ -224,9 +210,11 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
 
 function SectionHeading({ eyebrow, title }) {
   return (
-    <div className="homeSectionTitle">
-      <p className="eyebrow">{eyebrow}</p>
-      <h2>{title}</h2>
+    <div className="sectionTitle homeSectionTitle">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+      </div>
     </div>
   )
 }
