@@ -22,6 +22,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
+import { Agent } from 'undici'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -37,6 +38,10 @@ const port = Number(process.env.SERVER_PORT || 4178)
 const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
 const uploadLimits = { fileSize: 40 * 1024 * 1024 }
 const qaTokenCache = new Map()
+const insecureQaDispatcher =
+  String(process.env.QA_TLS_REJECT_UNAUTHORIZED || '').toLowerCase() === 'false'
+    ? new Agent({ connect: { rejectUnauthorized: false } })
+    : null
 
 await ensureDirectories()
 const db = await openDatabase()
@@ -229,6 +234,7 @@ app.post('/api/qa/chat', async (req, res, next) => {
         times: 0,
         parent_qa_id: '1',
       }),
+      ...qaFetchOptions(),
     })
     const data = await parseQaResponse(response)
     if (!response.ok) {
@@ -537,6 +543,7 @@ async function getQaAccessToken(baseUrl, account) {
       Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
     },
     body: JSON.stringify({ account }),
+    ...qaFetchOptions(),
   })
   const data = await safeJson(response)
   if (!response.ok || !data?.access_token) {
@@ -549,6 +556,10 @@ async function getQaAccessToken(baseUrl, account) {
     expiresAt: Date.now() + Math.max(60, expiresIn - 60) * 1000,
   })
   return data.access_token
+}
+
+function qaFetchOptions() {
+  return insecureQaDispatcher ? { dispatcher: insecureQaDispatcher } : {}
 }
 
 async function parseQaResponse(response) {

@@ -17,6 +17,7 @@
    - `QA_BOT_ID`：制造一厂知识问答助手 bot id，默认已填需求文档中的 id。
    - `QA_AUTH_CLIENT_ID` / `QA_AUTH_CLIENT_SECRET`：调用 `/api/authentication/v1/access_token` 所需的 Basic Auth 信息。
    - `QA_DEFAULT_ACCOUNT`：可选，仅用于不是从 OA 入口访问时的本地测试账号。
+   - `QA_TLS_REJECT_UNAUTHORIZED=false`：仅当内网知识问答平台证书不被 Node.js 信任时用于测试。
    - `TRANSLATION_API_URL`：默认已填内网 Qwen3-VL 接口。
    - 外网调试界面时可临时设置 `MOCK_AI=true`。
 
