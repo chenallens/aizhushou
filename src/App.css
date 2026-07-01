@@ -208,7 +208,6 @@ h2 {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  margin-top: 18px;
 }
 
 .metric {
@@ -270,7 +269,6 @@ h2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-  margin-top: 18px;
 }
 
 .assistantCard {
@@ -306,6 +304,30 @@ h2 {
   margin-top: 18px;
   border-radius: 8px;
   padding: 24px;
+}
+
+.homeSection {
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px solid rgba(185, 202, 220, 0.82);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.homeSectionTitle {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.homeSectionTitle h2 {
+  font-size: 24px;
 }
 
 .sectionTitle {
@@ -799,7 +821,8 @@ h2 {
   .topbar,
   .headline,
   .workspace,
-  .feedbackPanel {
+  .feedbackPanel,
+  .homeSection {
     padding: 14px;
   }
 

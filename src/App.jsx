@@ -126,7 +126,7 @@ function App() {
 
       <section className="headline">
         <div>
-          <p className="eyebrow">内网 AI 助手工作台</p>
+          <p className="eyebrow">AI助手服务台</p>
           <h1>{title}</h1>
         </div>
         <button className="primary" type="button" onClick={() => setFeedbackOpen(true)}>
@@ -182,28 +182,34 @@ function App() {
 function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
   return (
     <>
-      <section className="metrics">
-        <MetricCard label="问答助手使用" value={stats.qaUses} icon={<Bot size={21} />} tone="blue" />
-        <MetricCard label="翻译助手使用" value={stats.translationUses} icon={<Languages size={21} />} tone="green" />
-        <MetricCard label="今日活跃访问" value={stats.active.day} icon={<Activity size={21} />} tone="amber" />
-        <MetricCard label="本月 / 本年活跃" value={`${stats.active.month} / ${stats.active.year}`} icon={<Database size={21} />} tone="slate" />
+      <section className="homeSection">
+        <SectionHeading eyebrow="Core Functions" title="核心功能" />
+        <div className="assistantGrid">
+          <button className="assistantCard qa" type="button" onClick={() => onOpenAssistant('qa')}>
+            <span className="assistantIcon"><Bot size={26} /></span>
+            <span>
+              <strong>制造一厂知识问答AI助手</strong>
+              <small>连接既有知识问答接口，面向制造现场与业务知识查询。</small>
+            </span>
+          </button>
+          <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
+            <span className="assistantIcon"><Languages size={26} /></span>
+            <span>
+              <strong>翻译助手</strong>
+              <small>基于内网 Qwen3-VL 模型，支持词库参考、文档对照和结果下载。</small>
+            </span>
+          </button>
+        </div>
       </section>
 
-      <section className="assistantGrid">
-        <button className="assistantCard qa" type="button" onClick={() => onOpenAssistant('qa')}>
-          <span className="assistantIcon"><Bot size={26} /></span>
-          <span>
-            <strong>制造一厂知识问答AI助手</strong>
-            <small>连接既有知识问答接口，面向制造现场与业务知识查询。</small>
-          </span>
-        </button>
-        <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
-          <span className="assistantIcon"><Languages size={26} /></span>
-          <span>
-            <strong>翻译助手</strong>
-            <small>基于内网 Qwen3-VL 模型，支持词库参考、文档对照和结果下载。</small>
-          </span>
-        </button>
+      <section className="homeSection">
+        <SectionHeading eyebrow="Usage Metrics" title="统计指标" />
+        <div className="metrics">
+          <MetricCard label="问答助手使用" value={stats.qaUses} icon={<Bot size={21} />} tone="blue" />
+          <MetricCard label="翻译助手使用" value={stats.translationUses} icon={<Languages size={21} />} tone="green" />
+          <MetricCard label="今日活跃访问" value={stats.active.day} icon={<Activity size={21} />} tone="amber" />
+          <MetricCard label="本月 / 本年活跃" value={`${stats.active.month} / ${stats.active.year}`} icon={<Database size={21} />} tone="slate" />
+        </div>
       </section>
 
       <FeedbackBoard
@@ -213,6 +219,15 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
         setNotice={setNotice}
       />
     </>
+  )
+}
+
+function SectionHeading({ eyebrow, title }) {
+  return (
+    <div className="homeSectionTitle">
+      <p className="eyebrow">{eyebrow}</p>
+      <h2>{title}</h2>
+    </div>
   )
 }
 
