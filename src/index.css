@@ -1,0 +1,68 @@
+:root {
+  --ink: #152033;
+  --muted: #607086;
+  --faint: #8a98aa;
+  --line: #dfe8f2;
+  --line-strong: #b9cadc;
+  --paper: #ffffff;
+  --wash: #f4f8fb;
+  --blue: #1268d6;
+  --blue-soft: #e8f2ff;
+  --green: #0c9b7a;
+  --green-soft: #e3f7f1;
+  --amber: #b77907;
+  --amber-soft: #fff5d8;
+  --slate-soft: #edf2f7;
+  --shadow: 0 18px 45px rgba(35, 73, 118, 0.12);
+  --font-main: "Microsoft YaHei UI", "HarmonyOS Sans SC", "Aptos", sans-serif;
+  --font-display: "Bahnschrift", "Microsoft YaHei UI", "HarmonyOS Sans SC", sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+
+  color: var(--ink);
+  background:
+    linear-gradient(90deg, rgba(18, 104, 214, 0.06) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(12, 155, 122, 0.06) 1px, transparent 1px),
+    linear-gradient(180deg, #f9fcff 0%, #eff6fb 100%);
+  background-size: 44px 44px, 44px 44px, 100% 100%;
+  font-family: var(--font-main);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+#root {
+  min-height: 100svh;
+}
+
+a {
+  color: inherit;
+}
