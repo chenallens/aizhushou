@@ -242,7 +242,7 @@ app.post('/api/qa/chat', async (req, res, next) => {
       return
     }
     const cites = normalizeQaCites(extractQaCites(data), baseUrl, token)
-    res.json({ answer: cleanQaAnswer(extractQaAssistantText(data)), cites, raw: data })
+    res.json({ answer: cleanQaAnswer(extractQaAssistantText(data)) || '未返回内容', cites, raw: data })
   } catch (error) {
     next(error)
   }
@@ -283,7 +283,7 @@ app.post('/api/qa/chat/stream', async (req, res, next) => {
     const contentType = response.headers.get('content-type') || ''
     if (contentType.includes('application/json')) {
       const data = await safeJson(response)
-      const answer = cleanQaAnswer(extractQaAssistantText(data))
+      const answer = cleanQaAnswer(extractQaAssistantText(data)) || '未返回内容'
       const cites = normalizeQaCites(extractQaCites(data), qaRequest.baseUrl, qaRequest.token)
       writeSse(res, { type: 'answer', answer })
       writeSse(res, { type: 'done', answer, cites })
@@ -661,8 +661,10 @@ async function streamQaResponse(response, res, qaRequest) {
     for (const event of result.events) {
       const data = parseQaEvent(event)
       if (!data) continue
-      finalData = data
       const answer = cleanQaAnswer(extractQaAssistantText(data))
+      if (answer || extractQaCites(data).length > 0) {
+        finalData = data
+      }
       if (answer && answer !== lastAnswer) {
         lastAnswer = answer
         writeSse(res, { type: 'answer', answer })
@@ -675,8 +677,10 @@ async function streamQaResponse(response, res, qaRequest) {
   for (const event of result.events) {
     const data = parseQaEvent(event)
     if (!data) continue
-    finalData = data
     const answer = cleanQaAnswer(extractQaAssistantText(data))
+    if (answer || extractQaCites(data).length > 0) {
+      finalData = data
+    }
     if (answer) lastAnswer = answer
   }
 
@@ -791,7 +795,7 @@ function extractQaAssistantText(data) {
     data?.answer?.text ||
     data?.answer ||
     data?.message ||
-    extractAssistantText(data)
+    ''
   )
 }
 
