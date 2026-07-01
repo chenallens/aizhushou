@@ -248,6 +248,60 @@ app.post('/api/qa/chat', async (req, res, next) => {
   }
 })
 
+app.post('/api/qa/chat/stream', async (req, res, next) => {
+  try {
+    const messages = normalizeMessages(req.body)
+    if (!messages.length) {
+      res.status(400).json({ error: '请输入问题' })
+      return
+    }
+
+    if (isMockMode()) {
+      res.writeHead(200, sseHeaders())
+      const last = messages.at(-1)?.content || ''
+      const answer = `模拟回答：已收到“${last}”。切换到内网并配置 QA_API_BASE_URL 后将调用制造一厂知识问答助手。`
+      for (const chunk of splitAnswerForMock(answer)) {
+        writeSse(res, { type: 'answer', answer: chunk })
+        await delay(80)
+      }
+      writeSse(res, { type: 'done', answer, cites: [] })
+      res.end()
+      return
+    }
+
+    const qaRequest = await buildQaChatRequest(req.body, messages)
+    const response = await fetch(qaRequest.url, qaRequest.options)
+
+    if (!response.ok) {
+      const data = await parseQaResponse(response)
+      res.status(response.status).json({ error: data?.error || data?.message || '问答助手接口调用失败' })
+      return
+    }
+
+    res.writeHead(200, sseHeaders())
+
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await safeJson(response)
+      const answer = cleanQaAnswer(extractQaAssistantText(data))
+      const cites = normalizeQaCites(extractQaCites(data), qaRequest.baseUrl, qaRequest.token)
+      writeSse(res, { type: 'answer', answer })
+      writeSse(res, { type: 'done', answer, cites })
+      res.end()
+      return
+    }
+
+    await streamQaResponse(response, res, qaRequest)
+  } catch (error) {
+    if (res.headersSent) {
+      writeSse(res, { type: 'error', error: error.message || '问答助手流式调用失败' })
+      res.end()
+      return
+    }
+    next(error)
+  }
+})
+
 app.post('/api/translate', upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
@@ -563,6 +617,121 @@ function qaFetchOptions() {
   return insecureQaDispatcher ? { dispatcher: insecureQaDispatcher } : {}
 }
 
+async function buildQaChatRequest(body, messages) {
+  const baseUrl = normalizeBaseUrl(process.env.QA_API_BASE_URL)
+  if (!baseUrl) {
+    throw new Error('请先在 .env 中配置 QA_API_BASE_URL')
+  }
+
+  const account = resolveQaAccount(body)
+  if (!account) {
+    throw new Error('未获取到 OA 账号，请从 OA 入口访问本系统，或在 .env 中配置 QA_DEFAULT_ACCOUNT 用于测试')
+  }
+
+  const token = await getQaAccessToken(baseUrl, account)
+  const query = messages.at(-1)?.content || ''
+  return {
+    baseUrl,
+    token,
+    url: `${baseUrl}/api/intelli-search/v2/bots/${process.env.QA_BOT_ID || defaultQaBotId}/chat`,
+    options: {
+      method: 'POST',
+      headers: buildJsonHeaders(token),
+      body: JSON.stringify({
+        conversation_id: crypto.randomUUID(),
+        query,
+        times: 0,
+        parent_qa_id: '1',
+      }),
+      ...qaFetchOptions(),
+    },
+  }
+}
+
+async function streamQaResponse(response, res, qaRequest) {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let lastAnswer = ''
+  let finalData = null
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true })
+    const result = consumeQaEventLines(buffer)
+    buffer = result.remainder
+    for (const event of result.events) {
+      const data = parseQaEvent(event)
+      if (!data) continue
+      finalData = data
+      const answer = cleanQaAnswer(extractQaAssistantText(data))
+      if (answer && answer !== lastAnswer) {
+        lastAnswer = answer
+        writeSse(res, { type: 'answer', answer })
+      }
+    }
+  }
+
+  buffer += decoder.decode()
+  const result = consumeQaEventLines(`${buffer}\n`)
+  for (const event of result.events) {
+    const data = parseQaEvent(event)
+    if (!data) continue
+    finalData = data
+    const answer = cleanQaAnswer(extractQaAssistantText(data))
+    if (answer) lastAnswer = answer
+  }
+
+  const cites = normalizeQaCites(extractQaCites(finalData), qaRequest.baseUrl, qaRequest.token)
+  writeSse(res, { type: 'done', answer: lastAnswer, cites })
+  res.end()
+}
+
+function consumeQaEventLines(value) {
+  const lines = value.split(/\r?\n/)
+  const remainder = lines.pop() || ''
+  const events = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed === 'event: end') continue
+    const payload = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed
+    if (!payload || payload === 'event: end' || payload === '[DONE]') continue
+    events.push(payload)
+  }
+  return { events, remainder }
+}
+
+function parseQaEvent(payload) {
+  try {
+    return JSON.parse(payload)
+  } catch {
+    return null
+  }
+}
+
+function sseHeaders() {
+  return {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  }
+}
+
+function writeSse(res, data) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function splitAnswerForMock(answer) {
+  const chunks = []
+  for (let index = 1; index <= answer.length; index += 8) {
+    chunks.push(answer.slice(0, index + 7))
+  }
+  return chunks
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function parseQaResponse(response) {
   const contentType = response.headers.get('content-type') || ''
   const text = await response.text()
@@ -634,7 +803,7 @@ function cleanQaAnswer(value) {
   return stripHtmlTags(
     decodeHtmlEntities(
       String(value || '')
-        .replace(/<think[\s\S]*?<\/think>/gi, '')
+        .replace(/<think[\s\S]*?(<\/think>|$)/gi, '')
         .replace(/<\/?think>/gi, '')
         .replace(/<i\b[^>]*>(.*?)<\/i>/gi, '[$1]')
         .replace(/<br\s*\/?>/gi, '\n')

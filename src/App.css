@@ -441,6 +441,28 @@ h2 {
   white-space: pre-wrap;
 }
 
+.streamCursor {
+  display: inline-block;
+  width: 7px;
+  height: 18px;
+  margin-left: 3px;
+  border-radius: 2px;
+  background: var(--green);
+  vertical-align: -3px;
+  animation: streamBlink 900ms steps(2, start) infinite;
+}
+
+@keyframes streamBlink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  46%,
+  100% {
+    opacity: 0;
+  }
+}
+
 .qaCites {
   display: grid;
   gap: 10px;

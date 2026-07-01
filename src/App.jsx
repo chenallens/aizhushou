@@ -312,19 +312,47 @@ function QaView({ setNotice, oaCode }) {
     const text = input.trim()
     if (!text) return
     const nextMessages = [...messages, { role: 'user', content: text }]
-    setMessages(nextMessages)
+    const assistantIndex = nextMessages.length
+    setMessages([...nextMessages, { role: 'assistant', content: '', cites: [], streaming: true }])
     setInput('')
     setLoading(true)
     try {
-      const data = await api('/api/qa/chat', {
+      const response = await fetch('/api/qa/chat/stream', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: nextMessages, oaCode }),
       })
-      setMessages([...nextMessages, { role: 'assistant', content: data.answer || '未返回内容', cites: data.cites || [] }])
+      if (!response.ok) {
+        const errorText = await response.text()
+        const errorData = errorText ? JSON.parse(errorText) : {}
+        throw new Error(errorData.error || '问答助手调用失败')
+      }
+      await readQaStream(response, (eventData) => {
+        if (eventData.type === 'answer') {
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || '',
+            streaming: true,
+          }))
+        }
+        if (eventData.type === 'done') {
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || current[assistantIndex]?.content || '未返回内容',
+            cites: eventData.cites || [],
+            streaming: false,
+          }))
+        }
+        if (eventData.type === 'error') {
+          throw new Error(eventData.error || '问答助手流式调用失败')
+        }
+      })
     } catch (error) {
       setNotice(error.message)
-      setMessages([...nextMessages, { role: 'assistant', content: `调用失败：${error.message}` }])
+      setMessages((current) => updateMessageAt(current, assistantIndex, {
+        content: `调用失败：${error.message}`,
+        cites: [],
+        streaming: false,
+      }))
     } finally {
       setLoading(false)
     }
@@ -336,7 +364,10 @@ function QaView({ setNotice, oaCode }) {
         {messages.map((message, index) => (
           <div className={`chatMessage ${message.role}`} key={`${message.role}-${index}`}>
             <span>{message.role === 'user' ? '用户' : '助手'}</span>
-            <p className="chatText">{message.content}</p>
+            <p className="chatText">
+              {message.content || (message.streaming ? '正在生成回答...' : '')}
+              {message.streaming && <i className="streamCursor" />}
+            </p>
             {message.role === 'assistant' && message.cites?.length > 0 && (
               <div className="qaCites">
                 <strong><Quote size={15} /> 引用资料</strong>
@@ -354,7 +385,6 @@ function QaView({ setNotice, oaCode }) {
             )}
           </div>
         ))}
-        {loading && <div className="chatMessage assistant"><span>助手</span><p>正在检索知识库...</p></div>}
       </div>
       <form className="chatComposer" onSubmit={sendMessage}>
         <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入要咨询的问题" />
@@ -363,6 +393,47 @@ function QaView({ setNotice, oaCode }) {
         </button>
       </form>
     </section>
+  )
+}
+
+async function readQaStream(response, onEvent) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const eventData = parseSseData(part)
+      if (eventData) onEvent(eventData)
+    }
+  }
+
+  buffer += decoder.decode()
+  const eventData = parseSseData(buffer)
+  if (eventData) onEvent(eventData)
+}
+
+function parseSseData(part) {
+  const dataLine = part
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('data:'))
+  if (!dataLine) return null
+  try {
+    return JSON.parse(dataLine.slice(5).trim())
+  } catch {
+    return null
+  }
+}
+
+function updateMessageAt(messages, index, patch) {
+  return messages.map((message, messageIndex) =>
+    messageIndex === index ? { ...message, ...patch } : message,
   )
 }
 
