@@ -31,6 +31,7 @@ function App() {
   const [notice, setNotice] = useState('')
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
+  const [oaCode] = useState(() => new URLSearchParams(window.location.search).get('code') || '')
 
   useEffect(() => {
     async function boot() {
@@ -142,7 +143,7 @@ function App() {
           setNotice={setNotice}
         />
       )}
-      {view === 'qa' && <QaView setNotice={setNotice} />}
+      {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
       {view === 'admin' && (
         <AdminView
@@ -298,7 +299,7 @@ function FeedbackBoard({ items, isAdmin, onReplySaved, setNotice }) {
   )
 }
 
-function QaView({ setNotice }) {
+function QaView({ setNotice, oaCode }) {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: '你好，我是制造一厂知识问答AI助手。' },
   ])
@@ -317,7 +318,7 @@ function QaView({ setNotice }) {
       const data = await api('/api/qa/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: nextMessages }),
+        body: JSON.stringify({ messages: nextMessages, oaCode }),
       })
       setMessages([...nextMessages, { role: 'assistant', content: data.answer || '未返回内容' }])
     } catch (error) {

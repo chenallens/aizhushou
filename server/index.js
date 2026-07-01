@@ -34,9 +34,9 @@ const resultsDir = path.join(storageDir, 'results')
 const dbPath = path.join(storageDir, 'aizhushou.sqlite')
 const port = Number(process.env.SERVER_PORT || 4178)
 
-const assistantPath =
-  '/api/intelli-search/v2/bots/7172f29d-69c1-4f71-9646-03ab127e8f53/chat'
+const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
 const uploadLimits = { fileSize: 40 * 1024 * 1024 }
+const qaTokenCache = new Map()
 
 await ensureDirectories()
 const db = await openDatabase()
@@ -212,17 +212,30 @@ app.post('/api/qa/chat', async (req, res, next) => {
       return
     }
 
-    const response = await fetch(`${baseUrl}${assistantPath}`, {
+    const account = resolveQaAccount(req.body)
+    if (!account) {
+      res.status(400).json({ error: '未获取到 OA 账号，请从 OA 入口访问本系统，或在 .env 中配置 QA_DEFAULT_ACCOUNT 用于测试' })
+      return
+    }
+
+    const token = await getQaAccessToken(baseUrl, account)
+    const query = messages.at(-1)?.content || ''
+    const response = await fetch(`${baseUrl}/api/intelli-search/v2/bots/${process.env.QA_BOT_ID || defaultQaBotId}/chat`, {
       method: 'POST',
-      headers: buildJsonHeaders(process.env.QA_API_TOKEN),
-      body: JSON.stringify({ messages, stream: false }),
+      headers: buildJsonHeaders(token),
+      body: JSON.stringify({
+        conversation_id: crypto.randomUUID(),
+        query,
+        times: 0,
+        parent_qa_id: '1',
+      }),
     })
-    const data = await safeJson(response)
+    const data = await parseQaResponse(response)
     if (!response.ok) {
       res.status(response.status).json({ error: data?.error || data?.message || '问答助手接口调用失败' })
       return
     }
-    res.json({ answer: extractAssistantText(data), raw: data })
+    res.json({ answer: extractQaAssistantText(data), cites: extractQaCites(data), raw: data })
   } catch (error) {
     next(error)
   }
@@ -483,6 +496,90 @@ function buildJsonHeaders(token) {
   return headers
 }
 
+function resolveQaAccount(body) {
+  const code = String(body?.oaCode || body?.code || '').trim()
+  if (code) {
+    return decodePossibleBase64(code)
+  }
+  return String(process.env.QA_DEFAULT_ACCOUNT || '').trim()
+}
+
+function decodePossibleBase64(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+  const couldBeBase64 = /^[A-Za-z0-9+/=]+$/.test(normalized) && normalized.length % 4 !== 1
+  if (!couldBeBase64) return value
+  try {
+    const decoded = Buffer.from(normalized, 'base64').toString('utf8').trim()
+    if (decoded && /^[\w@.\-\u4e00-\u9fa5]+$/.test(decoded)) {
+      return decoded
+    }
+  } catch {
+    return value
+  }
+  return value
+}
+
+async function getQaAccessToken(baseUrl, account) {
+  const cached = qaTokenCache.get(account)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token
+  }
+  const clientId = process.env.QA_AUTH_CLIENT_ID
+  const clientSecret = process.env.QA_AUTH_CLIENT_SECRET
+  if (!clientId || !clientSecret) {
+    throw new Error('请先在 .env 中配置 QA_AUTH_CLIENT_ID 和 QA_AUTH_CLIENT_SECRET')
+  }
+
+  const response = await fetch(`${baseUrl}/api/authentication/v1/access_token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+    },
+    body: JSON.stringify({ account }),
+  })
+  const data = await safeJson(response)
+  if (!response.ok || !data?.access_token) {
+    throw new Error(data?.error || data?.message || '获取知识问答助手 access_token 失败')
+  }
+
+  const expiresIn = Number(data.expires_in || 3000)
+  qaTokenCache.set(account, {
+    token: data.access_token,
+    expiresAt: Date.now() + Math.max(60, expiresIn - 60) * 1000,
+  })
+  return data.access_token
+}
+
+async function parseQaResponse(response) {
+  const contentType = response.headers.get('content-type') || ''
+  const text = await response.text()
+  if (!text) return null
+
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text)
+    } catch {
+      return { message: text }
+    }
+  }
+
+  const events = []
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed === 'event: end') continue
+    const payload = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed
+    if (!payload || payload === 'event: end') continue
+    try {
+      events.push(JSON.parse(payload))
+    } catch {
+      events.push({ message: payload })
+    }
+  }
+
+  return events.reverse().find((item) => extractQaAssistantText(item)) || events.at(-1) || { message: text }
+}
+
 async function safeJson(response) {
   const text = await response.text()
   if (!text) return null
@@ -504,6 +601,21 @@ function extractAssistantText(data) {
     data?.choices?.[0]?.text ||
     JSON.stringify(data, null, 2)
   )
+}
+
+function extractQaAssistantText(data) {
+  return (
+    data?.result?.answer?.text ||
+    data?.result?.skills_process?.[0]?.text ||
+    data?.answer?.text ||
+    data?.answer ||
+    data?.message ||
+    extractAssistantText(data)
+  )
+}
+
+function extractQaCites(data) {
+  return data?.result?.answer?.cites || data?.answer?.cites || []
 }
 
 async function extractDocument(filePath, originalName, outputDir) {
