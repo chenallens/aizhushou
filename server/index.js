@@ -241,7 +241,8 @@ app.post('/api/qa/chat', async (req, res, next) => {
       res.status(response.status).json({ error: data?.error || data?.message || '问答助手接口调用失败' })
       return
     }
-    res.json({ answer: extractQaAssistantText(data), cites: extractQaCites(data), raw: data })
+    const cites = normalizeQaCites(extractQaCites(data), baseUrl, token)
+    res.json({ answer: cleanQaAnswer(extractQaAssistantText(data)), cites, raw: data })
   } catch (error) {
     next(error)
   }
@@ -588,7 +589,7 @@ async function parseQaResponse(response) {
     }
   }
 
-  return events.reverse().find((item) => extractQaAssistantText(item)) || events.at(-1) || { message: text }
+  return [...events].reverse().find((item) => extractQaAssistantText(item)) || events.at(-1) || { message: text }
 }
 
 async function safeJson(response) {
@@ -627,6 +628,65 @@ function extractQaAssistantText(data) {
 
 function extractQaCites(data) {
   return data?.result?.answer?.cites || data?.answer?.cites || []
+}
+
+function cleanQaAnswer(value) {
+  return stripHtmlTags(
+    decodeHtmlEntities(
+      String(value || '')
+        .replace(/<think[\s\S]*?<\/think>/gi, '')
+        .replace(/<\/?think>/gi, '')
+        .replace(/<i\b[^>]*>(.*?)<\/i>/gi, '[$1]')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>\s*<p>/gi, '\n\n')
+        .replace(/<\/?(p|div|section|article|ul|ol|li|span|strong|em|b)\b[^>]*>/gi, '\n'),
+    ),
+  )
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function normalizeQaCites(cites, baseUrl, token) {
+  if (!Array.isArray(cites)) return []
+  return cites
+    .filter((cite) => cite && cite.doc_id)
+    .map((cite, index) => {
+      const page = getCitePage(cite)
+      const docName = `${cite.doc_name || `引用文档${index + 1}`}${cite.ext_type || ''}`
+      return {
+        docId: cite.doc_id,
+        docName,
+        page,
+        snippet: cleanQaAnswer(cite.content || ''),
+        openUrl: buildQaFileUrl({ baseUrl, token, cite, page }),
+      }
+    })
+}
+
+function getCitePage(cite) {
+  const page = cite?.slices?.[0]?.pages?.[0]
+  return Number.isFinite(Number(page)) ? Number(page) : 1
+}
+
+function buildQaFileUrl({ baseUrl, token, cite, page }) {
+  const name = encodeURIComponent(cite.doc_name || '引用文档')
+  const extraData = encodeURIComponent(JSON.stringify({ force_read: true }))
+  return `${baseUrl}/anyshare/webfoxitreader?docid=${encodeURIComponent(cite.doc_id)}&tokenid=${encodeURIComponent(token)}&name=${name}&isShowActionMenuInSdk=false&extraData=${extraData}&page=${page}`
+}
+
+function stripHtmlTags(value) {
+  return String(value || '').replace(/<[^>]+>/g, '')
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
 }
 
 async function extractDocument(filePath, originalName, outputDir) {

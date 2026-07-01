@@ -10,6 +10,7 @@ import {
   LogIn,
   LogOut,
   MessageSquare,
+  Quote,
   Reply,
   Send,
   ShieldCheck,
@@ -320,7 +321,7 @@ function QaView({ setNotice, oaCode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: nextMessages, oaCode }),
       })
-      setMessages([...nextMessages, { role: 'assistant', content: data.answer || '未返回内容' }])
+      setMessages([...nextMessages, { role: 'assistant', content: data.answer || '未返回内容', cites: data.cites || [] }])
     } catch (error) {
       setNotice(error.message)
       setMessages([...nextMessages, { role: 'assistant', content: `调用失败：${error.message}` }])
@@ -335,7 +336,22 @@ function QaView({ setNotice, oaCode }) {
         {messages.map((message, index) => (
           <div className={`chatMessage ${message.role}`} key={`${message.role}-${index}`}>
             <span>{message.role === 'user' ? '用户' : '助手'}</span>
-            <p>{message.content}</p>
+            <p className="chatText">{message.content}</p>
+            {message.role === 'assistant' && message.cites?.length > 0 && (
+              <div className="qaCites">
+                <strong><Quote size={15} /> 引用资料</strong>
+                <div className="qaCiteGrid">
+                  {message.cites.map((cite) => (
+                    <a className="qaCiteCard" href={cite.openUrl} target="_blank" rel="noreferrer" key={`${cite.docId}-${cite.page}`}>
+                      <FileText size={17} />
+                      <span>{cite.docName}</span>
+                      <small>第 {cite.page} 页</small>
+                      {cite.snippet && <em>{cite.snippet}</em>}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ))}
         {loading && <div className="chatMessage assistant"><span>助手</span><p>正在检索知识库...</p></div>}
