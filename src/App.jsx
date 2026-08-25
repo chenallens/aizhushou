@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -541,6 +541,13 @@ function TranslateView({ setNotice }) {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const chatRailRef = useRef(null)
+
+  useEffect(() => {
+    const rail = chatRailRef.current
+    if (!rail) return
+    rail.scrollTo({ top: rail.scrollHeight, behavior: loading ? 'auto' : 'smooth' })
+  }, [messages, loading])
 
   async function sendText(event) {
     event.preventDefault()
@@ -627,7 +634,7 @@ function TranslateView({ setNotice }) {
 
       {mode === 'chat' ? (
         <div className="translationChat">
-          <div className="chatRail translationRail">
+          <div className="chatRail translationRail" ref={chatRailRef}>
             {messages.map((message, index) => (
               <div className={`chatMessage ${message.role} translationMessage`} key={`${message.role}-${index}`}>
                 <span>{message.role === 'user' ? '原文' : '翻译助手'}</span>
