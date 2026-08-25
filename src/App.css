@@ -814,6 +814,36 @@ h2 {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.taskUploadPanel.withFormControl {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 240px) auto;
+}
+
+.standardGradeField {
+  display: grid;
+  gap: 6px;
+}
+
+.standardGradeField span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.standardGradeField input {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+}
+
+.standardGradeField input:focus {
+  border-color: #75a9dc;
+  box-shadow: 0 0 0 3px rgba(18, 104, 214, 0.1);
+}
+
 .taskProgressPanel {
   display: grid;
   gap: 10px;
@@ -1329,6 +1359,15 @@ h2 {
     align-items: start;
   }
 
+  .taskUploadPanel.withFormControl {
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 220px);
+  }
+
+  .taskUploadPanel.withFormControl > button {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+
   .translationHeader {
     align-items: flex-start;
     flex-direction: column;
@@ -1424,6 +1463,15 @@ h2 {
 
   .qaCiteGrid {
     grid-template-columns: 1fr;
+  }
+
+  .taskUploadPanel.withFormControl {
+    grid-template-columns: 1fr;
+  }
+
+  .taskUploadPanel.withFormControl > button {
+    grid-column: auto;
+    justify-self: stretch;
   }
 
   .translationControls,

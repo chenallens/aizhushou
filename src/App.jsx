@@ -723,6 +723,8 @@ function PdfToWordView({ setNotice }) {
 }
 
 function StandardView({ setNotice }) {
+  const [grade, setGrade] = useState('')
+
   return (
     <DocumentTaskView
       title="标准解读（一厂）"
@@ -736,6 +738,19 @@ function StandardView({ setNotice }) {
       icon={<BookOpenCheck size={30} />}
       resultTitle="标准解读预览"
       setNotice={setNotice}
+      extraFields={{ grade }}
+      formControl={(
+        <label className="standardGradeField">
+          <span>解读牌号</span>
+          <input
+            required
+            maxLength={100}
+            value={grade}
+            onChange={(event) => setGrade(event.target.value)}
+            placeholder="请输入所需解读的牌号"
+          />
+        </label>
+      )}
     />
   )
 }
@@ -753,6 +768,7 @@ function DocumentTaskView({
   resultTitle,
   setNotice,
   extraFields = {},
+  formControl = null,
   embedded = false,
 }) {
   const [file, setFile] = useState(null)
@@ -817,13 +833,14 @@ function DocumentTaskView({
         </div>
       )}
 
-      <form className="uploadPanel taskUploadPanel" onSubmit={submit}>
+      <form className={`uploadPanel taskUploadPanel ${formControl ? 'withFormControl' : ''}`} onSubmit={submit}>
         <label className="uploadZone">
           {icon}
           <strong>{file ? file.name : emptyLabel}</strong>
           <span>{fileHint}</span>
           <input type="file" accept={accept} onChange={(event) => setFile(event.target.files?.[0] || null)} />
         </label>
+        {formControl}
         <button className="primary" type="submit" disabled={submitting || processing}>
           <FileOutput size={18} /> {submitting || processing ? `${workingLabel}...` : actionLabel}
         </button>

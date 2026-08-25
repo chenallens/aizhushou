@@ -565,11 +565,23 @@ app.post('/api/standards/plant-1', upload.single('file'), async (req, res, next)
       res.status(400).json({ error: '标准解读助手仅支持 DOCX 文件' })
       return
     }
+    const grade = String(req.body?.grade || '').replace(/\s+/g, ' ').trim()
+    if (!grade) {
+      await removeFile(req.file.path)
+      res.status(400).json({ error: '请输入所需解读的牌号' })
+      return
+    }
+    if (grade.length > 100) {
+      await removeFile(req.file.path)
+      res.status(400).json({ error: '牌号不能超过 100 字' })
+      return
+    }
     const task = createDocumentTask({
       type: 'standard-plant-1',
       originalName: req.file.originalname,
       storedName: req.file.filename,
       stage: '文件已上传，等待解读',
+      metadata: { grade },
     })
     setImmediate(() => {
       processStandardTask(task.id, 'standard-plant-1').catch((error) => failDocumentTask(task.id, error))
@@ -1639,15 +1651,19 @@ async function processStandardTask(taskId, assistantId) {
   )
   if (!extracted.text) throw new Error('Word 文档中没有提取到可解读内容')
   const promptRow = get('SELECT prompt FROM assistant_prompts WHERE assistant_id = ?', [assistantId])
-  const prompt = promptRow?.prompt || defaultStandardPrompt
+  const grade = String(task.metadata?.grade || '').trim()
+  if (!grade) throw new Error('该标准解读任务缺少牌号，请重新上传')
+  const savedPrompt = promptRow?.prompt || defaultStandardPrompt
+  const gradePrompt = `######\n用户输入的牌号为：“${grade}”`
+  const prompt = `${gradePrompt}\n\n${savedPrompt}`
   const chunks = splitText(extracted.text, 12000)
   const interpreted = []
   const diagnostics = []
   for (const [index, chunk] of chunks.entries()) {
     updateDocumentTask(taskId, {
       progress: Math.floor(10 + (index / chunks.length) * 78),
-      stage: `正在解读第 ${index + 1}/${chunks.length} 个文档片段`,
-      metadata: { totalChunks: chunks.length },
+      stage: `正在解读牌号 ${grade}，第 ${index + 1}/${chunks.length} 个文档片段`,
+      metadata: { grade, totalChunks: chunks.length },
     })
     const result = await callSharedModel({
       purpose: `standard-plant-1:${index + 1}/${chunks.length}`,
@@ -1682,7 +1698,7 @@ async function processStandardTask(taskId, assistantId) {
     stage: '解读完成，可以下载 Word',
     resultName,
     previewHtml: markdownToHtml(markdown),
-    metadata: buildTaskDiagnostics({ diagnostics, totalChunks: chunks.length }),
+    metadata: buildTaskDiagnostics({ diagnostics, grade, totalChunks: chunks.length }),
     error: null,
   })
 }
