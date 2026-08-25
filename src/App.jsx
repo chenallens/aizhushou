@@ -9,12 +9,15 @@ import {
   Database,
   Download,
   Factory,
+  FileWarning,
   FileOutput,
   FileText,
   Languages,
   LogIn,
   LogOut,
   MessageSquare,
+  Pencil,
+  Plus,
   Quote,
   Reply,
   Save,
@@ -22,7 +25,8 @@ import {
   Send,
   Settings2,
   ShieldCheck,
-  UploadCloud,
+  Trash2,
+  X,
 } from 'lucide-react'
 import './App.css'
 
@@ -237,8 +241,8 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
           <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
             <span className="assistantIcon"><Languages size={26} /></span>
             <span>
-              <strong>文档翻译助手</strong>
-              <small>使用内网 Qwen-Lite 模型，支持词库参考、文档对照和 Word 下载。</small>
+              <strong>翻译助手</strong>
+              <small>支持文本对话与 Word 文档，并使用管理员词库完成翻译校订。</small>
             </span>
           </button>
         </div>
@@ -528,70 +532,168 @@ function updateMessageAt(messages, index, patch) {
 
 function TranslateView({ setNotice }) {
   const [direction, setDirection] = useState('en-zh')
-  const [file, setFile] = useState(null)
+  const [mode, setMode] = useState('chat')
+  const [messages, setMessages] = useState([
+    {
+      role: 'assistant',
+      content: '请输入需要翻译的文字。我会先直接翻译，再依据词库润色，最后检查误译、语法和时态。',
+    },
+  ])
+  const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
 
-  async function submit(event) {
+  async function sendText(event) {
     event.preventDefault()
-    if (!file) {
-      setNotice('请选择 PDF 或 DOCX 文件')
-      return
-    }
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('direction', direction)
+    const text = input.trim()
+    if (!text || loading) return
+    const assistantIndex = messages.length + 1
+    setMessages((current) => [
+      ...current,
+      { role: 'user', content: text },
+      { role: 'assistant', content: '', streaming: true, progress: 0, stage: '准备翻译' },
+    ])
+    setInput('')
     setLoading(true)
-    setResult(null)
     try {
-      const data = await api('/api/translate', { method: 'POST', body: formData })
-      setResult(data.translation)
-      setNotice('翻译完成')
+      const response = await fetch('/api/translate/chat/stream', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, direction }),
+      })
+      if (!response.ok) {
+        const errorText = await response.text()
+        let errorData = {}
+        try { errorData = errorText ? JSON.parse(errorText) : {} } catch { errorData = {} }
+        throw new Error(errorData.error || '翻译助手调用失败')
+      }
+      await readQaStream(response, (eventData) => {
+        if (eventData.type === 'progress') {
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            stage: eventData.stage,
+            progress: eventData.progress,
+            step: eventData.step,
+          }))
+        }
+        if (eventData.type === 'answer') {
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || '',
+            streaming: true,
+          }))
+        }
+        if (eventData.type === 'done') {
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || '未返回内容',
+            streaming: false,
+            progress: 100,
+            stage: '翻译完成',
+            glossaryCount: eventData.glossaryCount || 0,
+          }))
+        }
+        if (eventData.type === 'error') throw new Error(eventData.error || '翻译助手调用失败')
+      })
     } catch (error) {
       setNotice(error.message)
+      setMessages((current) => updateMessageAt(current, assistantIndex, {
+        content: `翻译失败：${error.message}`,
+        streaming: false,
+        progress: 0,
+        stage: '处理失败',
+      }))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <section className="workspace translateWorkspace">
-      <form className="uploadPanel" onSubmit={submit}>
-        <label className="uploadZone">
-          <UploadCloud size={32} />
-          <strong>{file ? file.name : '选择待翻译文件'}</strong>
-          <span>支持 PDF / DOCX，上传后自动提取并生成 Word 结果</span>
-          <input type="file" accept=".pdf,.docx" onChange={(event) => setFile(event.target.files?.[0] || null)} />
-        </label>
-        <div className="segmented">
-          <button type="button" className={direction === 'en-zh' ? 'active' : ''} onClick={() => setDirection('en-zh')}>
-            英译汉
-          </button>
-          <button type="button" className={direction === 'zh-en' ? 'active' : ''} onClick={() => setDirection('zh-en')}>
-            汉译英
-          </button>
+    <section className="workspace translateWorkspace translationWorkbench">
+      <div className="translationHeader">
+        <div>
+          <p className="eyebrow">Translation Workflow</p>
+          <h2>翻译助手</h2>
         </div>
-        <button className="primary" type="submit" disabled={loading}>
-          <Languages size={18} /> {loading ? '翻译中...' : '开始翻译'}
-        </button>
-      </form>
+        <div className="translationControls">
+          <div className="modeTabs" aria-label="翻译方式">
+            <button type="button" className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}>
+              <MessageSquare size={16} /> 对话翻译
+            </button>
+            <button type="button" className={mode === 'document' ? 'active' : ''} onClick={() => setMode('document')}>
+              <FileText size={16} /> Word 文件
+            </button>
+          </div>
+          <DirectionControl direction={direction} setDirection={setDirection} disabled={loading} />
+        </div>
+      </div>
 
-      {result && (
-        <>
-          <div className="translationMeta">
-            <span><FileText size={16} /> {result.originalName}</span>
-            <span>使用词库：{result.glossaryNames.length ? result.glossaryNames.join('、') : '未上传词库'}</span>
-            <a className="downloadButton" href={result.downloadUrl}>
-              <Download size={17} /> 下载 Word
-            </a>
+      {mode === 'chat' ? (
+        <div className="translationChat">
+          <div className="chatRail translationRail">
+            {messages.map((message, index) => (
+              <div className={`chatMessage ${message.role} translationMessage`} key={`${message.role}-${index}`}>
+                <span>{message.role === 'user' ? '原文' : '翻译助手'}</span>
+                {message.role === 'assistant' && message.stage && (
+                  <div className="inlineTranslationProgress">
+                    <div><Settings2 size={15} /><strong>{message.stage}</strong><b>{message.progress}%</b></div>
+                    <div className="progressTrack"><i style={{ width: `${message.progress || 0}%` }} /></div>
+                  </div>
+                )}
+                <pre className="translationMarkdown">
+                  {message.content || (message.streaming ? '正在处理...' : '')}
+                  {message.streaming && <i className="streamCursor" />}
+                </pre>
+                {message.glossaryCount !== undefined && (
+                  <small className="glossaryUsage">本次校订使用 {message.glossaryCount} 条术语</small>
+                )}
+              </div>
+            ))}
           </div>
-          <div className="compareGrid">
-            <DocumentPane title="原文内容" html={result.originalHtml} />
-            <DocumentPane title="翻译内容" html={result.translatedHtml} />
-          </div>
-        </>
+          <form className="translationComposer" onSubmit={sendText}>
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.ctrlKey && event.key === 'Enter') sendText(event)
+              }}
+              placeholder="输入需要翻译的文字"
+              rows={4}
+            />
+            <button className="primary" type="submit" disabled={loading || !input.trim()}>
+              <Send size={18} /> {loading ? '处理中...' : '发送翻译'}
+            </button>
+          </form>
+        </div>
+      ) : (
+        <div className="translationDocumentMode">
+          <div className="fileTypeNotice"><FileWarning size={19} /><span>仅支持 DOCX Word 文件，请勿上传 PDF、Excel 或其他格式。</span></div>
+          <DocumentTaskView
+            endpoint="/api/translate/document"
+            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            emptyLabel="选择待翻译 Word 文档"
+            fileHint="系统将保留文本层级并输出 Markdown 格式的 Word 结果"
+            actionLabel="开始翻译"
+            workingLabel="正在翻译"
+            icon={<Languages size={30} />}
+            resultTitle="Markdown 翻译结果"
+            setNotice={setNotice}
+            extraFields={{ direction }}
+            embedded
+          />
+        </div>
       )}
     </section>
+  )
+}
+
+function DirectionControl({ direction, setDirection, disabled = false }) {
+  return (
+    <div className="segmented" aria-label="翻译方向">
+      <button type="button" disabled={disabled} className={direction === 'en-zh' ? 'active' : ''} onClick={() => setDirection('en-zh')}>
+        英译汉
+      </button>
+      <button type="button" disabled={disabled} className={direction === 'zh-en' ? 'active' : ''} onClick={() => setDirection('zh-en')}>
+        汉译英
+      </button>
+    </div>
   )
 }
 
@@ -643,6 +745,8 @@ function DocumentTaskView({
   icon,
   resultTitle,
   setNotice,
+  extraFields = {},
+  embedded = false,
 }) {
   const [file, setFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -680,6 +784,7 @@ function DocumentTaskView({
     }
     const formData = new FormData()
     formData.append('file', file)
+    Object.entries(extraFields).forEach(([key, value]) => formData.append(key, value))
     setSubmitting(true)
     setTask(null)
     try {
@@ -694,14 +799,16 @@ function DocumentTaskView({
   }
 
   return (
-    <section className="workspace documentTaskWorkspace">
-      <div className="taskIntro">
-        <div>
-          <p className="eyebrow">Document Intelligence</p>
-          <h2>{title}</h2>
+    <section className={`${embedded ? 'embeddedTask' : 'workspace'} documentTaskWorkspace`}>
+      {!embedded && (
+        <div className="taskIntro">
+          <div>
+            <p className="eyebrow">Document Intelligence</p>
+            <h2>{title}</h2>
+          </div>
+          <p>{description}</p>
         </div>
-        <p>{description}</p>
-      </div>
+      )}
 
       <form className="uploadPanel taskUploadPanel" onSubmit={submit}>
         <label className="uploadZone">
@@ -757,22 +864,23 @@ function DocumentPane({ title, html }) {
 }
 
 function AdminView({ isAdmin, onRequireLogin, setNotice }) {
-  const [glossaries, setGlossaries] = useState([])
+  const [terms, setTerms] = useState([])
   const [prompts, setPrompts] = useState([])
   const [audit, setAudit] = useState([])
-  const [file, setFile] = useState(null)
-  const [loading, setLoading] = useState(false)
+  const [termForm, setTermForm] = useState({ zhTerm: '', enTerm: '', note: '' })
+  const [editingTermId, setEditingTermId] = useState(null)
+  const [savingTerm, setSavingTerm] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState('')
 
   useEffect(() => {
     if (isAdmin) {
-      Promise.all([loadGlossaries(), loadPrompts(), loadAudit()]).catch((error) => setNotice(error.message))
+      Promise.all([loadTerms(), loadPrompts(), loadAudit()]).catch((error) => setNotice(error.message))
     }
   }, [isAdmin, setNotice])
 
-  async function loadGlossaries() {
-    const data = await api('/api/glossaries')
-    setGlossaries(data.items || [])
+  async function loadTerms() {
+    const data = await api('/api/glossary-terms')
+    setTerms(data.items || [])
   }
 
   async function loadPrompts() {
@@ -802,24 +910,45 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
     }
   }
 
-  async function uploadGlossary(event) {
+  async function saveTerm(event) {
     event.preventDefault()
-    if (!file) {
-      setNotice('请选择词库文件')
-      return
-    }
-    const formData = new FormData()
-    formData.append('file', file)
-    setLoading(true)
+    setSavingTerm(true)
     try {
-      await api('/api/glossaries', { method: 'POST', body: formData })
-      setFile(null)
-      await loadGlossaries()
-      setNotice('词库已上传')
+      await api(editingTermId ? `/api/glossary-terms/${editingTermId}` : '/api/glossary-terms', {
+        method: editingTermId ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(termForm),
+      })
+      setTermForm({ zhTerm: '', enTerm: '', note: '' })
+      setEditingTermId(null)
+      await loadTerms()
+      setNotice(editingTermId ? '词库条目已更新' : '词库条目已新增')
     } catch (error) {
       setNotice(error.message)
     } finally {
-      setLoading(false)
+      setSavingTerm(false)
+    }
+  }
+
+  function editTerm(item) {
+    setEditingTermId(item.id)
+    setTermForm({ zhTerm: item.zhTerm, enTerm: item.enTerm, note: item.note || '' })
+  }
+
+  function cancelTermEdit() {
+    setEditingTermId(null)
+    setTermForm({ zhTerm: '', enTerm: '', note: '' })
+  }
+
+  async function deleteTerm(item) {
+    if (!window.confirm(`确定删除术语“${item.zhTerm} / ${item.enTerm}”吗？`)) return
+    try {
+      await api(`/api/glossary-terms/${item.id}`, { method: 'DELETE' })
+      if (editingTermId === item.id) cancelTermEdit()
+      await loadTerms()
+      setNotice('词库条目已删除')
+    } catch (error) {
+      setNotice(error.message)
     }
   }
 
@@ -828,7 +957,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
       <section className="workspace adminLocked">
         <ShieldCheck size={42} />
         <h2>需要管理员身份</h2>
-        <p>管理员登录后可上传标准词库，并回复首页反馈。</p>
+        <p>管理员登录后可逐条维护翻译词库、设置标准解读提示词并回复首页反馈。</p>
         <button className="primary" type="button" onClick={onRequireLogin}>
           <LogIn size={18} /> 管理员登录
         </button>
@@ -838,36 +967,58 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
 
   return (
     <section className="workspace adminWorkspace">
-      <form className="uploadPanel" onSubmit={uploadGlossary}>
-        <label className="uploadZone compact">
-          <UploadCloud size={28} />
-          <strong>{file ? file.name : '上传标准词库'}</strong>
-          <span>PDF / DOCX 文件将提取为翻译参考词库</span>
-          <input type="file" accept=".pdf,.docx" onChange={(event) => setFile(event.target.files?.[0] || null)} />
-        </label>
-        <button className="primary" type="submit" disabled={loading}>
-          <Database size={18} /> {loading ? '上传中...' : '上传词库'}
-        </button>
-      </form>
-
-      <section className="glossaryList">
+      <section className="glossaryManager">
         <div className="sectionTitle">
           <div>
             <p className="eyebrow">Terminology Assets</p>
-            <h2>标准词库文件</h2>
+            <h2>翻译术语词库</h2>
           </div>
-          <span>{glossaries.length} 个</span>
+          <span>{terms.length} 条</span>
         </div>
-        {glossaries.length === 0 && <p className="empty">暂无词库文件。</p>}
-        {glossaries.map((item) => (
-          <article className="glossaryItem" key={item.id}>
-            <FileText size={19} />
-            <div>
-              <strong>{item.originalName}</strong>
-              <span>{formatTime(item.createdAt)}</span>
-            </div>
-          </article>
-        ))}
+        <p className="glossaryHelp">每条术语会自动同步到后台 Markdown 词库，供翻译助手在直译后进行校订与润色。</p>
+        <form className="termEditor" onSubmit={saveTerm}>
+          <label>
+            <span>中文术语</span>
+            <input required maxLength={200} value={termForm.zhTerm} onChange={(event) => setTermForm((current) => ({ ...current, zhTerm: event.target.value }))} placeholder="例如：熔炼工序" />
+          </label>
+          <label>
+            <span>英文术语</span>
+            <input required maxLength={200} value={termForm.enTerm} onChange={(event) => setTermForm((current) => ({ ...current, enTerm: event.target.value }))} placeholder="例如：melting process" />
+          </label>
+          <label className="termNoteField">
+            <span>说明（可选）</span>
+            <input maxLength={500} value={termForm.note} onChange={(event) => setTermForm((current) => ({ ...current, note: event.target.value }))} placeholder="适用场景、缩写或使用要求" />
+          </label>
+          <div className="termFormActions">
+            <button className="primary" type="submit" disabled={savingTerm}>
+              {editingTermId ? <Save size={17} /> : <Plus size={17} />}
+              {savingTerm ? '保存中...' : editingTermId ? '保存修改' : '新增术语'}
+            </button>
+            {editingTermId && (
+              <button className="ghost" type="button" onClick={cancelTermEdit}>
+                <X size={17} /> 取消
+              </button>
+            )}
+          </div>
+        </form>
+
+        <div className="glossaryList">
+          {terms.length === 0 && <p className="empty">暂无词库条目，请先新增一条术语。</p>}
+          {terms.map((item) => (
+            <article className={`glossaryItem termItem ${editingTermId === item.id ? 'editing' : ''}`} key={item.id}>
+              <div className="termPair">
+                <strong>{item.zhTerm}</strong>
+                <span>{item.enTerm}</span>
+              </div>
+              <p>{item.note || '无补充说明'}</p>
+              <time>{formatTime(item.updatedAt)}</time>
+              <div className="termActions">
+                <button className="iconButton" type="button" title="编辑术语" aria-label={`编辑 ${item.zhTerm}`} onClick={() => editTerm(item)}><Pencil size={17} /></button>
+                <button className="iconButton danger" type="button" title="删除术语" aria-label={`删除 ${item.zhTerm}`} onClick={() => deleteTerm(item)}><Trash2 size={17} /></button>
+              </div>
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="promptSettings">

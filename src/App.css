@@ -632,6 +632,166 @@ h2 {
   gap: 18px;
 }
 
+.translationWorkbench {
+  min-height: 620px;
+  align-content: start;
+}
+
+.translationHeader,
+.translationControls,
+.modeTabs,
+.inlineTranslationProgress > div:first-child,
+.fileTypeNotice {
+  display: flex;
+  align-items: center;
+}
+
+.translationHeader {
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.translationControls {
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.modeTabs {
+  height: 42px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f7fb;
+}
+
+.modeTabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.modeTabs button.active {
+  color: var(--blue);
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(25, 62, 101, 0.12);
+}
+
+.translationChat {
+  display: grid;
+  grid-template-rows: minmax(330px, 44vh) auto;
+  gap: 12px;
+}
+
+.translationRail {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7fafc;
+}
+
+.translationMessage {
+  width: min(820px, 94%);
+}
+
+.translationMarkdown {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+}
+
+.inlineTranslationProgress {
+  display: grid;
+  gap: 7px;
+  margin: 2px 0 12px;
+  padding: 9px 10px;
+  border: 1px solid #c8ddf2;
+  border-radius: 7px;
+  background: #f2f8fe;
+}
+
+.inlineTranslationProgress > div:first-child {
+  gap: 7px;
+  color: var(--blue);
+}
+
+.inlineTranslationProgress strong {
+  flex: 1;
+  font-size: 13px;
+}
+
+.inlineTranslationProgress b {
+  font-size: 12px;
+}
+
+.inlineTranslationProgress .progressTrack {
+  height: 6px;
+}
+
+.glossaryUsage {
+  display: block;
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--green);
+}
+
+.translationComposer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.translationComposer textarea {
+  width: 100%;
+  min-height: 104px;
+  padding: 13px 14px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+}
+
+.translationComposer textarea:focus,
+.termEditor input:focus {
+  border-color: #75a9dc;
+  box-shadow: 0 0 0 3px rgba(18, 104, 214, 0.1);
+}
+
+.translationDocumentMode,
+.embeddedTask {
+  display: grid;
+  gap: 16px;
+}
+
+.fileTypeNotice {
+  gap: 9px;
+  padding: 11px 13px;
+  border-left: 3px solid #c98617;
+  color: #6f4b0d;
+  background: #fff9e9;
+}
+
+.fileTypeNotice svg {
+  flex: 0 0 auto;
+}
+
 .documentTaskWorkspace {
   display: grid;
   gap: 18px;
@@ -876,6 +1036,115 @@ h2 {
   gap: 12px;
 }
 
+.glossaryManager {
+  display: grid;
+  gap: 14px;
+}
+
+.glossaryHelp {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.termEditor {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(180px, 0.9fr) minmax(220px, 1.3fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #bfd6f4;
+  border-radius: 8px;
+  background: #f7fbff;
+}
+
+.termEditor label {
+  display: grid;
+  gap: 6px;
+}
+
+.termEditor label > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.termEditor input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+}
+
+.termFormActions,
+.termActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.termItem {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1.2fr) auto auto;
+  gap: 14px;
+}
+
+.termItem.editing {
+  border-color: #75a9dc;
+  background: #f7fbff;
+}
+
+.termPair strong,
+.termPair span {
+  display: block;
+}
+
+.termPair span {
+  margin-top: 3px;
+  color: var(--blue);
+}
+
+.termItem > p,
+.termItem > time {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.termItem > time {
+  white-space: nowrap;
+}
+
+.iconButton {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--blue);
+  background: #fff;
+}
+
+.iconButton:hover {
+  border-color: #9dbfe2;
+  background: var(--blue-soft);
+}
+
+.iconButton.danger {
+  color: #b42318;
+}
+
+.iconButton.danger:hover {
+  border-color: #efb4ae;
+  background: #fff3f2;
+}
+
+.termActions .iconButton svg {
+  color: currentColor;
+}
+
 .promptSettings,
 .modelAudit {
   display: grid;
@@ -1059,6 +1328,33 @@ h2 {
     grid-template-columns: 1fr;
     align-items: start;
   }
+
+  .translationHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .translationControls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .termEditor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .termNoteField,
+  .termFormActions {
+    grid-column: 1 / -1;
+  }
+
+  .termItem {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .termItem > p {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 620px) {
@@ -1128,5 +1424,34 @@ h2 {
 
   .qaCiteGrid {
     grid-template-columns: 1fr;
+  }
+
+  .translationControls,
+  .modeTabs,
+  .translationComposer,
+  .termEditor {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .modeTabs {
+    width: 100%;
+    height: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .translationMessage {
+    width: 100%;
+  }
+
+  .termNoteField,
+  .termFormActions,
+  .termItem > p {
+    grid-column: auto;
+  }
+
+  .termItem {
+    grid-template-columns: 1fr;
+    justify-items: start;
   }
 }

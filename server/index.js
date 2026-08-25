@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser'
 import multer from 'multer'
 import initSqlJs from 'sql.js'
 import mammoth from 'mammoth'
+import { parse as parseHtml } from 'node-html-parser'
 import { PDFParse } from 'pdf-parse'
 import {
   Document,
@@ -23,17 +24,18 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { Agent } from 'undici'
-import { callSharedModel, readModelAudit } from './model-client.js'
+import { callSharedModel, callSharedModelStream, readModelAudit } from './model-client.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const rootDir = path.resolve(__dirname, '..')
-const storageDir = path.join(rootDir, 'storage')
+const storageDir = path.resolve(process.env.STORAGE_DIR || path.join(rootDir, 'storage'))
 const uploadDir = path.join(storageDir, 'uploads')
 const glossaryDir = path.join(storageDir, 'glossaries')
 const convertedDir = path.join(storageDir, 'converted')
 const resultsDir = path.join(storageDir, 'results')
 const dbPath = path.join(storageDir, 'aizhushou.sqlite')
+const glossaryMarkdownPath = path.join(storageDir, 'glossary.md')
 const port = Number(process.env.SERVER_PORT || 4178)
 
 const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
@@ -51,6 +53,7 @@ const insecureQaDispatcher =
 await ensureDirectories()
 const db = await openDatabase()
 ensureSchema()
+syncGlossaryMarkdown()
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -173,6 +176,47 @@ app.get('/api/glossaries', (_req, res) => {
      ORDER BY datetime(created_at) DESC`,
   )
   res.json({ items: rows })
+})
+
+app.get('/api/glossary-terms', requireAdmin, (_req, res) => {
+  res.json({ items: getGlossaryTerms() })
+})
+
+app.post('/api/glossary-terms', requireAdmin, (req, res) => {
+  const term = validateGlossaryTerm(req.body)
+  run(
+    `INSERT INTO glossary_terms (zh_term, en_term, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [term.zhTerm, term.enTerm, term.note, now(), now()],
+  )
+  syncGlossaryMarkdown()
+  res.status(201).json({ ok: true, item: getGlossaryTerms()[0] })
+})
+
+app.patch('/api/glossary-terms/:id', requireAdmin, (req, res) => {
+  const existing = get('SELECT id FROM glossary_terms WHERE id = ?', [req.params.id])
+  if (!existing) {
+    res.status(404).json({ error: '未找到该词库条目' })
+    return
+  }
+  const term = validateGlossaryTerm(req.body)
+  run(
+    `UPDATE glossary_terms SET zh_term = ?, en_term = ?, note = ?, updated_at = ? WHERE id = ?`,
+    [term.zhTerm, term.enTerm, term.note, now(), req.params.id],
+  )
+  syncGlossaryMarkdown()
+  res.json({ ok: true })
+})
+
+app.delete('/api/glossary-terms/:id', requireAdmin, (req, res) => {
+  const existing = get('SELECT id FROM glossary_terms WHERE id = ?', [req.params.id])
+  if (!existing) {
+    res.status(404).json({ error: '未找到该词库条目' })
+    return
+  }
+  run('DELETE FROM glossary_terms WHERE id = ?', [req.params.id])
+  syncGlossaryMarkdown()
+  res.json({ ok: true })
 })
 
 app.get('/api/admin/prompts', requireAdmin, (_req, res) => {
@@ -415,6 +459,75 @@ app.post('/api/translate', upload.single('file'), async (req, res, next) => {
   }
 })
 
+app.post('/api/translate/chat/stream', async (req, res, next) => {
+  const sourceText = cleanText(req.body?.text || '')
+  if (!sourceText) {
+    res.status(400).json({ error: '请输入要翻译的文字' })
+    return
+  }
+  if (sourceText.length > 30000) {
+    res.status(400).json({ error: '单次对话翻译不能超过 30000 字，请拆分后发送' })
+    return
+  }
+  const direction = req.body?.direction === 'zh-en' ? 'zh-en' : 'en-zh'
+  const terms = getGlossaryTerms()
+  try {
+    res.writeHead(200, sseHeaders())
+    const result = await runTranslationPipeline({
+      sourceText,
+      direction,
+      glossaryMarkdown: buildGlossaryMarkdown(terms),
+      purpose: 'translation-chat',
+      streamFinal: true,
+      onStage: (event) => writeSse(res, { type: 'progress', ...event }),
+      onFinalDelta: (answer) => writeSse(res, { type: 'answer', answer }),
+    })
+    writeSse(res, {
+      type: 'done',
+      answer: result.content,
+      progress: 100,
+      stage: '翻译完成',
+      glossaryCount: terms.length,
+    })
+    res.end()
+  } catch (error) {
+    if (res.headersSent) {
+      writeSse(res, { type: 'error', error: error.message || '翻译助手调用失败' })
+      res.end()
+      return
+    }
+    next(error)
+  }
+})
+
+app.post('/api/translate/document', upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: '请选择要翻译的 Word 文件' })
+      return
+    }
+    if (path.extname(req.file.originalname || '').toLowerCase() !== '.docx') {
+      await removeFile(req.file.path)
+      res.status(400).json({ error: '文件翻译仅支持 DOCX，请勿上传 PDF、Excel 或其他格式' })
+      return
+    }
+    const direction = req.body?.direction === 'zh-en' ? 'zh-en' : 'en-zh'
+    const task = createDocumentTask({
+      type: 'translation-document',
+      originalName: req.file.originalname,
+      storedName: req.file.filename,
+      stage: '文件已上传，等待翻译',
+      metadata: { direction },
+    })
+    setImmediate(() => {
+      processTranslationDocumentTask(task.id).catch((error) => failDocumentTask(task.id, error))
+    })
+    res.status(202).json({ ok: true, task })
+  } catch (error) {
+    next(error)
+  }
+})
+
 app.post('/api/pdf-to-word', upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
@@ -476,7 +589,7 @@ app.get('/api/document-tasks/:id', (req, res) => {
   res.json({ task })
 })
 
-app.get('/api/document-tasks/:id/download', (req, res) => {
+app.get('/api/document-tasks/:id/download', (req, res, next) => {
   const task = getDocumentTask(req.params.id)
   if (!task || task.status !== 'completed' || !task.resultName) {
     res.status(404).json({ error: '结果文件尚未生成' })
@@ -488,11 +601,16 @@ app.get('/api/document-tasks/:id/download', (req, res) => {
     return
   }
   const baseName = path.parse(decodeUploadFilename(task.originalName)).name
-  const downloadName = task.type === 'pdf-to-word' ? `${baseName}.docx` : `${baseName}-标准解读.docx`
-  res.download(filePath, downloadName)
+  const downloadName =
+    task.type === 'pdf-to-word'
+      ? `${baseName}.docx`
+      : task.type === 'translation-document'
+        ? `${baseName}-翻译.docx`
+        : `${baseName}-标准解读.docx`
+  sendDocxDownload(res, filePath, downloadName, next)
 })
 
-app.get('/api/translations/:id/download', (req, res) => {
+app.get('/api/translations/:id/download', (req, res, next) => {
   const row = get('SELECT result_name AS resultName, original_name AS originalName FROM translations WHERE id = ?', [
     req.params.id,
   ])
@@ -505,9 +623,7 @@ app.get('/api/translations/:id/download', (req, res) => {
     res.status(404).json({ error: '翻译文件不存在' })
     return
   }
-  const safeName = encodeURIComponent(`${row.originalName}-translated.docx`)
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeName}`)
-  res.download(filePath)
+  sendDocxDownload(res, filePath, `${path.parse(row.originalName).name}-translated.docx`, next)
 })
 
 const distDir = path.join(rootDir, 'dist')
@@ -571,6 +687,15 @@ function ensureSchema() {
       text_content TEXT NOT NULL,
       html_content TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS glossary_terms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      zh_term TEXT NOT NULL,
+      en_term TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS translations (
@@ -648,6 +773,47 @@ function saveDatabase() {
 
 function now() {
   return new Date().toISOString()
+}
+
+function getGlossaryTerms() {
+  return all(
+    `SELECT id, zh_term AS zhTerm, en_term AS enTerm, note,
+      created_at AS createdAt, updated_at AS updatedAt
+     FROM glossary_terms ORDER BY datetime(updated_at) DESC, id DESC`,
+  )
+}
+
+function validateGlossaryTerm(value) {
+  const zhTerm = String(value?.zhTerm || '').trim()
+  const enTerm = String(value?.enTerm || '').trim()
+  const note = String(value?.note || '').trim()
+  if (!zhTerm || !enTerm) throw Object.assign(new Error('中文术语和英文术语均不能为空'), { status: 400 })
+  if (zhTerm.length > 200 || enTerm.length > 200) {
+    throw Object.assign(new Error('单个术语不能超过 200 字'), { status: 400 })
+  }
+  if (note.length > 500) throw Object.assign(new Error('术语说明不能超过 500 字'), { status: 400 })
+  return { zhTerm, enTerm, note }
+}
+
+function buildGlossaryMarkdown(terms = getGlossaryTerms()) {
+  const lines = [
+    '# 翻译术语词库',
+    '',
+    '| 中文术语 | 英文术语 | 说明 |',
+    '| --- | --- | --- |',
+  ]
+  for (const term of terms) {
+    lines.push(`| ${escapeMarkdownCell(term.zhTerm)} | ${escapeMarkdownCell(term.enTerm)} | ${escapeMarkdownCell(term.note)} |`)
+  }
+  return lines.join('\n')
+}
+
+function syncGlossaryMarkdown() {
+  fs.writeFileSync(glossaryMarkdownPath, `${buildGlossaryMarkdown()}\n`, 'utf8')
+}
+
+function escapeMarkdownCell(value) {
+  return String(value || '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
 }
 
 function recordEvent(type) {
@@ -1071,6 +1237,90 @@ async function translateText(text, direction, glossaryText) {
   return translated.join('\n\n')
 }
 
+async function runTranslationPipeline({
+  sourceText,
+  direction,
+  glossaryMarkdown,
+  purpose,
+  streamFinal = false,
+  onStage,
+  onFinalDelta,
+}) {
+  const directionText = direction === 'zh-en' ? '中文翻译为英文' : '英文翻译为中文'
+  const source = cleanText(sourceText)
+  if (!source) throw new Error('没有提取到可翻译内容')
+
+  onStage?.({ step: 1, progress: 8, stage: '正在直接翻译' })
+  const direct = await callSharedModel({
+    purpose: `${purpose}:direct`,
+    messages: [
+      { role: 'system', content: '你是严谨的企业文档翻译助手。关闭思考输出，只返回翻译正文。' },
+      {
+        role: 'user',
+        content: [
+          `翻译方向：${directionText}。`,
+          '直接准确翻译以下内容。保留原有段落、标题、编号、列表和 Markdown 表格结构。',
+          '不要解释、总结或添加原文没有的内容，只输出纯 Markdown 译文。',
+          source,
+        ].join('\n\n'),
+      },
+    ],
+    mockContent: `[模拟直译]\n\n${source}`,
+  })
+  const directText = normalizeMarkdownSource(direct.content)
+
+  onStage?.({ step: 2, progress: 38, stage: '正在依据词库修正与润色' })
+  const polished = await callSharedModel({
+    purpose: `${purpose}:glossary-polish`,
+    messages: [
+      { role: 'system', content: '你是企业专业术语校订与语言润色助手。关闭思考输出，只返回修订后的译文。' },
+      {
+        role: 'user',
+        content: [
+          `翻译方向：${directionText}。`,
+          '根据术语词库校正下面的直译稿，并在不改变事实、数值、单位和语气的前提下润色表达。',
+          '词库中存在匹配项时必须优先采用；没有匹配项时保持准确自然。保留纯 Markdown 排版。',
+          '不要输出修改说明，只输出修订后的完整译文。',
+          `术语词库：\n${glossaryMarkdown}`,
+          `原文：\n${source}`,
+          `直译稿：\n${directText}`,
+        ].join('\n\n'),
+      },
+    ],
+    mockContent: `[模拟词库润色]\n\n${directText}`,
+  })
+  const polishedText = normalizeMarkdownSource(polished.content)
+
+  onStage?.({ step: 3, progress: 70, stage: '正在检查误译、语法和时态' })
+  const finalRequest = {
+    purpose: `${purpose}:quality-check`,
+    messages: [
+      { role: 'system', content: '你是双语翻译质检员。关闭思考输出，只返回最终通过质检的译文。' },
+      {
+        role: 'user',
+        content: [
+          `翻译方向：${directionText}。`,
+          '检查修订稿是否存在漏译、错译、术语错误、语法错误、时态错误、指代不清或不自然表达，并直接修正。',
+          '必须忠于原文，保留数值、单位、层级与纯 Markdown 排版。不要输出检查报告、解释或前后缀，只输出最终完整译文。',
+          `原文：\n${source}`,
+          `修订稿：\n${polishedText}`,
+        ].join('\n\n'),
+      },
+    ],
+    mockContent: `[模拟质检完成]\n\n${polishedText}`,
+  }
+  const checked = streamFinal
+    ? await callSharedModelStream({
+        ...finalRequest,
+        onDelta: (value) => onFinalDelta?.(normalizeMarkdownSource(value)),
+      })
+    : await callSharedModel(finalRequest)
+  return {
+    content: normalizeMarkdownSource(checked.content),
+    diagnostics: [direct.diagnostics, polished.diagnostics, checked.diagnostics],
+  }
+}
+
 function buildTranslatePrompt({ chunk, direction, glossaryText, index, total }) {
   const directionText = direction === 'zh-en' ? '中文翻译为英文' : '英文翻译为中文'
   return [
@@ -1088,25 +1338,42 @@ function splitText(text, maxLength) {
   const chunks = []
   let current = ''
   for (const paragraph of paragraphs) {
-    if ((current + '\n\n' + paragraph).length > maxLength && current) {
-      chunks.push(current)
-      current = paragraph
-    } else {
-      current = current ? `${current}\n\n${paragraph}` : paragraph
+    for (const part of splitLongBlock(paragraph, maxLength)) {
+      if ((current + '\n\n' + part).length > maxLength && current) {
+        chunks.push(current)
+        current = part
+      } else {
+        current = current ? `${current}\n\n${part}` : part
+      }
     }
   }
   if (current) chunks.push(current)
   return chunks
 }
 
-function createDocumentTask({ type, originalName, storedName, stage }) {
+function splitLongBlock(value, maxLength) {
+  const parts = []
+  let remaining = String(value || '')
+  while (remaining.length > maxLength) {
+    const window = remaining.slice(0, maxLength)
+    const candidates = [window.lastIndexOf('\n'), window.lastIndexOf('。'), window.lastIndexOf('. ')]
+    const best = Math.max(...candidates)
+    const cutAt = best >= Math.floor(maxLength * 0.6) ? best + 1 : maxLength
+    parts.push(remaining.slice(0, cutAt).trim())
+    remaining = remaining.slice(cutAt).trim()
+  }
+  if (remaining) parts.push(remaining)
+  return parts
+}
+
+function createDocumentTask({ type, originalName, storedName, stage, metadata = {} }) {
   const id = crypto.randomUUID()
   const timestamp = now()
   run(
     `INSERT INTO document_tasks
-      (id, type, status, progress, stage, original_name, stored_name, created_at, updated_at)
-     VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?)`,
-    [id, type, stage, originalName, storedName, timestamp, timestamp],
+      (id, type, status, progress, stage, original_name, stored_name, metadata_json, created_at, updated_at)
+     VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`,
+    [id, type, stage, originalName, storedName, JSON.stringify(metadata), timestamp, timestamp],
   )
   return getDocumentTask(id)
 }
@@ -1169,6 +1436,116 @@ function failDocumentTask(id, error) {
     stage: '处理失败',
     error: String(error?.message || '文档处理失败').slice(0, 2000),
   })
+}
+
+async function processTranslationDocumentTask(taskId) {
+  const task = getDocumentTask(taskId)
+  if (!task) return
+  updateDocumentTask(taskId, { status: 'processing', progress: 3, stage: '正在读取 Word 文档' })
+  const sourceMarkdown = await extractDocxMarkdown(path.join(uploadDir, task.storedName))
+  if (!sourceMarkdown) throw new Error('Word 文档中没有提取到可翻译内容')
+
+  const direction = task.metadata?.direction === 'zh-en' ? 'zh-en' : 'en-zh'
+  const terms = getGlossaryTerms()
+  const glossaryMarkdown = buildGlossaryMarkdown(terms)
+  const chunks = splitText(sourceMarkdown, 6500)
+  const translated = []
+  const diagnostics = []
+  updateDocumentTask(taskId, {
+    progress: 6,
+    stage: `已读取文档，准备翻译 ${chunks.length} 个片段`,
+    metadata: { direction, glossaryCount: terms.length, totalChunks: chunks.length },
+  })
+
+  for (const [index, chunk] of chunks.entries()) {
+    const result = await runTranslationPipeline({
+      sourceText: chunk,
+      direction,
+      glossaryMarkdown,
+      purpose: `translation-document:${index + 1}/${chunks.length}`,
+      onStage: ({ step, stage }) => {
+        const completedStages = index * 3 + (step - 1)
+        const progress = Math.floor(8 + (completedStages / (chunks.length * 3)) * 82)
+        updateDocumentTask(taskId, {
+          progress,
+          stage: `第 ${index + 1}/${chunks.length} 个片段：${stage}`,
+        })
+      },
+    })
+    translated.push(result.content)
+    diagnostics.push(...result.diagnostics)
+  }
+
+  updateDocumentTask(taskId, { progress: 93, stage: '正在生成 Markdown 格式 Word 文档' })
+  const markdown = translated.join('\n\n')
+  const resultName = `${Date.now()}-${crypto.randomUUID()}-translation.docx`
+  await createDocxFromMarkdownSource({
+    markdown,
+    outputPath: path.join(resultsDir, resultName),
+  })
+  updateDocumentTask(taskId, {
+    status: 'completed',
+    progress: 100,
+    stage: '翻译与质检完成，可以下载 Word',
+    resultName,
+    previewHtml: markdownSourceToHtml(markdown),
+    metadata: buildTaskDiagnostics({
+      diagnostics,
+      direction,
+      glossaryCount: terms.length,
+      totalChunks: chunks.length,
+    }),
+    error: null,
+  })
+}
+
+async function extractDocxMarkdown(filePath) {
+  const buffer = await fsp.readFile(filePath)
+  const [{ value: html }, { value: rawText }] = await Promise.all([
+    mammoth.convertToHtml({ buffer }),
+    mammoth.extractRawText({ buffer }),
+  ])
+  const structured = htmlFragmentToMarkdown(html)
+  const raw = cleanText(rawText || '')
+  if (!structured) return raw
+  return structured.length >= raw.length * 0.55 ? structured : raw
+}
+
+function htmlFragmentToMarkdown(html) {
+  const root = parseHtml(String(html || ''))
+  return root.childNodes
+    .map((node) => htmlBlockToMarkdown(node))
+    .filter(Boolean)
+    .join('\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function htmlBlockToMarkdown(node) {
+  const tag = String(node?.tagName || '').toLowerCase()
+  if (!tag) return cleanText(node?.text || '')
+  const text = cleanText(node.textContent || '')
+  if (/^h[1-6]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${text}`
+  if (tag === 'p') return text
+  if (tag === 'ul' || tag === 'ol') {
+    return node.querySelectorAll('li')
+      .map((item, index) => `${tag === 'ol' ? `${index + 1}.` : '-'} ${cleanText(item.textContent || '')}`)
+      .join('\n')
+  }
+  if (tag === 'table') {
+    const rows = node.querySelectorAll('tr').map((row) =>
+      row.querySelectorAll('th,td').map((cell) => escapeMarkdownCell(cleanText(cell.textContent || ''))),
+    )
+    const width = Math.max(0, ...rows.map((row) => row.length))
+    if (!rows.length || !width) return text
+    const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')])
+    return [
+      `| ${normalized[0].join(' | ')} |`,
+      `| ${Array(width).fill('---').join(' | ')} |`,
+      ...normalized.slice(1).map((row) => `| ${row.join(' | ')} |`),
+    ].join('\n')
+  }
+  return node.childNodes.map((child) => htmlBlockToMarkdown(child)).filter(Boolean).join('\n\n') || text
 }
 
 async function processPdfToWordTask(taskId) {
@@ -1394,6 +1771,15 @@ async function removeFile(filePath) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error
   }
+}
+
+function sendDocxDownload(res, filePath, downloadName, next) {
+  const safeName = encodeURIComponent(downloadName).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+  res.setHeader('Content-Disposition', `attachment; filename="download.docx"; filename*=UTF-8''${safeName}`)
+  fs.createReadStream(filePath).on('error', next).pipe(res)
 }
 
 async function createDocxFromText({ title, text, outputPath, direction, glossaryNames = [] }) {

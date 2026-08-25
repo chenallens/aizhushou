@@ -15,6 +15,7 @@ dist-ssr
 storage/*.sqlite
 storage/**/*.docx
 storage/**/*.pdf
+storage/glossary.md
 
 # Editor directories and files
 .vscode/*

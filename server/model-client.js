@@ -3,7 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const auditDir = path.resolve(__dirname, '..', 'storage', 'logs')
+const auditDir = path.resolve(process.env.STORAGE_DIR || path.resolve(__dirname, '..', 'storage'), 'logs')
 const auditPath = path.join(auditDir, 'model-audit.log')
 
 export async function callSharedModel({ messages, purpose, mockContent = '' }) {
@@ -84,6 +84,132 @@ export async function callSharedModel({ messages, purpose, mockContent = '' }) {
   }
 }
 
+export async function callSharedModelStream({ messages, purpose, mockContent = '', onDelta }) {
+  const startedAt = Date.now()
+  const endpoint = String(
+    process.env.AI_MODEL_API_URL ||
+      process.env.TRANSLATION_API_URL ||
+      'http://172.28.200.7:7888/qwen3long/v1/chat/completions',
+  ).trim()
+  const model = String(process.env.AI_MODEL_NAME || process.env.TRANSLATION_MODEL || 'Qwen-Lite').trim()
+
+  if (isMockMode()) {
+    const content = mockContent || '[模拟模型结果]'
+    let streamed = ''
+    for (const chunk of content.match(/.{1,24}/gs) || [content]) {
+      streamed += chunk
+      onDelta?.(streamed)
+      await new Promise((resolve) => setTimeout(resolve, 8))
+    }
+    const diagnostics = buildDiagnostics({ content })
+    await writeAudit({
+      purpose,
+      endpoint,
+      model,
+      status: 'mock',
+      statusCode: 200,
+      durationMs: Date.now() - startedAt,
+      ...diagnostics,
+    })
+    return { content, diagnostics }
+  }
+
+  const headers = { 'Content-Type': 'application/json' }
+  const apiKey = String(process.env.AI_MODEL_API_KEY || '').trim()
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+
+  let response
+  let rawContent = ''
+  let reasoningContent = ''
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    })
+
+    const contentType = response.headers.get('content-type') || ''
+    if (!response.ok || contentType.includes('application/json')) {
+      const data = await readJsonResponse(response)
+      if (!response.ok) throw new Error(extractModelError(data) || `模型调用失败，状态码 ${response.status}`)
+      rawContent = extractModelContent(data)
+      onDelta?.(stripStreamingThinking(rawContent))
+      reasoningContent = String(
+        data?.choices?.[0]?.message?.reasoning_content || data?.choices?.[0]?.message?.reasoning || '',
+      )
+    } else {
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('模型流式响应不可读取')
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finished = false
+      while (!finished) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          const parsed = parseStreamLine(line)
+          if (parsed === 'done') {
+            finished = true
+            break
+          }
+          if (!parsed) continue
+          rawContent += parsed.content
+          reasoningContent += parsed.reasoning
+          onDelta?.(stripStreamingThinking(rawContent))
+        }
+      }
+      buffer += decoder.decode()
+      const parsed = parseStreamLine(buffer)
+      if (parsed && parsed !== 'done') {
+        rawContent += parsed.content
+        reasoningContent += parsed.reasoning
+        onDelta?.(stripStreamingThinking(rawContent))
+      }
+    }
+
+    const content = stripStreamingThinking(rawContent).trim()
+    if (!content) throw new Error('模型未返回可用内容')
+    const diagnostics = {
+      ...buildDiagnostics({ content }),
+      responseHasReasoning: Boolean(reasoningContent.trim()),
+      reasoningLength: reasoningContent.trim().length,
+    }
+    await writeAudit({
+      purpose,
+      endpoint,
+      model,
+      status: 'success',
+      statusCode: response.status,
+      durationMs: Date.now() - startedAt,
+      ...diagnostics,
+    })
+    return { content, diagnostics }
+  } catch (error) {
+    await writeAudit({
+      purpose,
+      endpoint,
+      model,
+      status: 'failed',
+      statusCode: response?.status || null,
+      durationMs: Date.now() - startedAt,
+      responseHasReasoning: Boolean(reasoningContent.trim()),
+      reasoningLength: reasoningContent.trim().length,
+      contentContainsThinkTag: /<\/?think\b/i.test(rawContent),
+      error: error.message,
+    })
+    throw error
+  }
+}
+
 export async function readModelAudit(limit = 30) {
   try {
     const content = await fsp.readFile(auditPath, 'utf8')
@@ -138,6 +264,32 @@ function extractModelContent(data) {
 function extractModelError(data) {
   const value = data?.error?.message || data?.error || data?.message
   return typeof value === 'string' ? value : ''
+}
+
+function parseStreamLine(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed || !trimmed.startsWith('data:')) return null
+  const payload = trimmed.slice(5).trim()
+  if (payload === '[DONE]') return 'done'
+  try {
+    const data = JSON.parse(payload)
+    const delta = data?.choices?.[0]?.delta || data?.choices?.[0]?.message || {}
+    const contentValue = delta.content ?? delta.text ?? ''
+    const content = Array.isArray(contentValue)
+      ? contentValue.map((item) => (typeof item === 'string' ? item : item?.text || '')).join('')
+      : String(contentValue || '')
+    const reasoning = String(delta.reasoning_content || delta.reasoning || '')
+    return { content, reasoning }
+  } catch {
+    return null
+  }
+}
+
+function stripStreamingThinking(value) {
+  return String(value || '')
+    .replace(/<think[\s\S]*?<\/think>/gi, '')
+    .replace(/<think[\s\S]*$/gi, '')
+    .replace(/<\/?think>/gi, '')
 }
 
 function buildDiagnostics({ content, data = null }) {
