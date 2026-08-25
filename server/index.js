@@ -554,8 +554,19 @@ app.post('/api/pdf-to-word', upload.single('file'), async (req, res, next) => {
   }
 })
 
-app.post('/api/standards/plant-1', upload.single('file'), async (req, res, next) => {
+app.post('/api/standards/:plantId', upload.single('file'), async (req, res, next) => {
   try {
+    const assistantMap = {
+      'plant-1': 'standard-plant-1',
+      'plant-2': 'standard-plant-2',
+      'plant-3': 'standard-plant-3',
+    }
+    const assistantId = assistantMap[req.params.plantId]
+    if (!assistantId) {
+      if (req.file) await removeFile(req.file.path)
+      res.status(404).json({ error: '未找到该标准解读助手' })
+      return
+    }
     if (!req.file) {
       res.status(400).json({ error: '请选择要解读的 Word 文件' })
       return
@@ -577,14 +588,14 @@ app.post('/api/standards/plant-1', upload.single('file'), async (req, res, next)
       return
     }
     const task = createDocumentTask({
-      type: 'standard-plant-1',
+      type: assistantId,
       originalName: req.file.originalname,
       storedName: req.file.filename,
       stage: '文件已上传，等待解读',
       metadata: { grade },
     })
     setImmediate(() => {
-      processStandardTask(task.id, 'standard-plant-1').catch((error) => failDocumentTask(task.id, error))
+      processStandardTask(task.id, assistantId).catch((error) => failDocumentTask(task.id, error))
     })
     res.status(202).json({ ok: true, task })
   } catch (error) {
@@ -1666,7 +1677,7 @@ async function processStandardTask(taskId, assistantId) {
       metadata: { grade, totalChunks: chunks.length },
     })
     const result = await callSharedModel({
-      purpose: `standard-plant-1:${index + 1}/${chunks.length}`,
+      purpose: `${assistantId}:${index + 1}/${chunks.length}`,
       messages: [
         { role: 'system', content: prompt },
         {
@@ -1686,7 +1697,7 @@ async function processStandardTask(taskId, assistantId) {
 
   updateDocumentTask(taskId, { progress: 92, stage: '正在生成 Markdown 格式 Word 文档' })
   const markdown = interpreted.join('\n\n')
-  const resultName = `${Date.now()}-${crypto.randomUUID()}-standard-plant-1.docx`
+  const resultName = `${Date.now()}-${crypto.randomUUID()}-${assistantId}.docx`
   await createDocxFromMarkdownSource({
     markdown,
     outputPath: path.join(resultsDir, resultName),

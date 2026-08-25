@@ -77,6 +77,8 @@ function App() {
       translate: 'translation',
       pdf: 'pdf',
       standard1: 'standard',
+      standard2: 'standard',
+      standard3: 'standard',
     }[nextView]
     if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST' })
     setView(nextView)
@@ -104,7 +106,7 @@ function App() {
           <button className={view === 'home' ? 'active' : ''} type="button" onClick={() => setView('home')}>
             <Activity size={17} /> 首页
           </button>
-          <button className={view === 'standard1' ? 'active' : ''} type="button" onClick={() => openAssistant('standard1')}>
+          <button className={view.startsWith('standard') ? 'active' : ''} type="button" onClick={() => openAssistant('standard1')}>
             <BookOpenCheck size={17} /> 标准解读
           </button>
           <button className={view === 'pdf' ? 'active' : ''} type="button" onClick={() => openAssistant('pdf')}>
@@ -159,7 +161,9 @@ function App() {
       {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
       {view === 'pdf' && <PdfToWordView setNotice={setNotice} />}
-      {view === 'standard1' && <StandardView setNotice={setNotice} />}
+      {view === 'standard1' && <StandardView plant={1} setNotice={setNotice} />}
+      {view === 'standard2' && <StandardView plant={2} setNotice={setNotice} />}
+      {view === 'standard3' && <StandardView plant={3} setNotice={setNotice} />}
       {view === 'admin' && (
         <AdminView
           isAdmin={me.isAdmin}
@@ -205,21 +209,19 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
               <small>提取标准关键要求并按管理员提示词生成结构化解读。</small>
             </span>
           </button>
-          <button className="assistantCard standard pending" type="button" disabled>
+          <button className="assistantCard standard" type="button" onClick={() => onOpenAssistant('standard2')}>
             <span className="assistantIcon"><BookOpenCheck size={26} /></span>
             <span>
               <strong>标准解读（二厂）</strong>
-              <small>待一厂版本验证完成后开放。</small>
+              <small>输入牌号并上传 Word 标准，按二厂提示词生成 Markdown 解读。</small>
             </span>
-            <em>待开放</em>
           </button>
-          <button className="assistantCard standard pending" type="button" disabled>
+          <button className="assistantCard standard" type="button" onClick={() => onOpenAssistant('standard3')}>
             <span className="assistantIcon"><BookOpenCheck size={26} /></span>
             <span>
               <strong>标准解读（三厂）</strong>
-              <small>待一厂版本验证完成后开放。</small>
+              <small>输入牌号并上传 Word 标准，按三厂提示词生成 Markdown 解读。</small>
             </span>
-            <em>待开放</em>
           </button>
         </div>
       </AccordionSection>
@@ -722,14 +724,15 @@ function PdfToWordView({ setNotice }) {
   )
 }
 
-function StandardView({ setNotice }) {
+function StandardView({ plant, setNotice }) {
   const [grade, setGrade] = useState('')
+  const plantName = { 1: '一厂', 2: '二厂', 3: '三厂' }[plant] || '一厂'
 
   return (
     <DocumentTaskView
-      title="标准解读（一厂）"
+      title={`标准解读（${plantName}）`}
       description="上传 DOCX 标准文件，系统将依据管理员设置的提示词提取关键要求并生成结构化解读。"
-      endpoint="/api/standards/plant-1"
+      endpoint={`/api/standards/plant-${plant}`}
       accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       emptyLabel="选择待解读 Word 文档"
       fileHint="支持 DOCX；文档中的 Markdown 表格、公式文本和层级结构会尽量保留"
@@ -1058,7 +1061,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             <article className="promptEditor" key={item.assistantId}>
               <div>
                 <strong>标准解读（{['一厂', '二厂', '三厂'][index] || index + 1}）</strong>
-                {index > 0 && <span>功能待开放，提示词可提前配置</span>}
+                {index > 0 && <span>提示词可独立配置</span>}
               </div>
               <textarea
                 rows={10}
