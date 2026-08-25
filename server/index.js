@@ -1684,11 +1684,10 @@ async function processStandardTask(taskId, assistantId) {
     interpreted.push(stripModelThinking(result.content))
   }
 
-  updateDocumentTask(taskId, { progress: 92, stage: '正在排版并生成 Word 文档' })
+  updateDocumentTask(taskId, { progress: 92, stage: '正在生成 Markdown 格式 Word 文档' })
   const markdown = interpreted.join('\n\n')
   const resultName = `${Date.now()}-${crypto.randomUUID()}-standard-plant-1.docx`
-  await createDocxFromMarkdown({
-    title: `${path.parse(task.originalName).name} 标准解读（一厂）`,
+  await createDocxFromMarkdownSource({
     markdown,
     outputPath: path.join(resultsDir, resultName),
   })
@@ -1697,7 +1696,7 @@ async function processStandardTask(taskId, assistantId) {
     progress: 100,
     stage: '解读完成，可以下载 Word',
     resultName,
-    previewHtml: markdownToHtml(markdown),
+    previewHtml: markdownSourceToHtml(markdown),
     metadata: buildTaskDiagnostics({ diagnostics, grade, totalChunks: chunks.length }),
     error: null,
   })
@@ -1861,140 +1860,6 @@ async function createDocxFromMarkdownSource({ markdown, outputPath }) {
   await fsp.writeFile(outputPath, await Packer.toBuffer(doc))
 }
 
-async function createDocxFromMarkdown({ title, markdown, outputPath }) {
-  const children = [
-    new Paragraph({
-      text: title || '文档处理结果',
-      heading: HeadingLevel.HEADING_1,
-      spacing: { after: 260 },
-    }),
-  ]
-  const lines = cleanText(markdown).split('\n')
-  let index = 0
-  while (index < lines.length) {
-    const line = lines[index].trim()
-    if (!line) {
-      index += 1
-      continue
-    }
-    if (isMarkdownTableLine(line)) {
-      const tableLines = []
-      while (index < lines.length && isMarkdownTableLine(lines[index].trim())) {
-        tableLines.push(lines[index].trim())
-        index += 1
-      }
-      const normalized = tableLines.filter((item) => !isMarkdownSeparator(item))
-      if (normalized.length) children.push(createMarkdownTable(normalized))
-      continue
-    }
-    const heading = line.match(/^(#{1,4})\s+(.+)$/)
-    if (heading) {
-      const headingLevels = [
-        HeadingLevel.HEADING_1,
-        HeadingLevel.HEADING_2,
-        HeadingLevel.HEADING_3,
-        HeadingLevel.HEADING_4,
-      ]
-      children.push(
-        new Paragraph({
-          children: markdownInlineRuns(heading[2]),
-          heading: headingLevels[heading[1].length - 1],
-          spacing: { before: 180, after: 100 },
-        }),
-      )
-      index += 1
-      continue
-    }
-    const bullet = line.match(/^[-*+]\s+(.+)$/)
-    if (bullet) {
-      children.push(
-        new Paragraph({
-          children: markdownInlineRuns(bullet[1]),
-          bullet: { level: 0 },
-          spacing: { after: 70 },
-        }),
-      )
-      index += 1
-      continue
-    }
-    if (/^---+$/.test(line)) {
-      children.push(new Paragraph({ text: '', spacing: { before: 120, after: 120 } }))
-      index += 1
-      continue
-    }
-    const paragraphLines = [line]
-    index += 1
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !/^(#{1,4})\s+/.test(lines[index].trim()) &&
-      !/^[-*+]\s+/.test(lines[index].trim()) &&
-      !isMarkdownTableLine(lines[index].trim()) &&
-      !/^---+$/.test(lines[index].trim())
-    ) {
-      paragraphLines.push(lines[index].trim())
-      index += 1
-    }
-    children.push(
-      new Paragraph({
-        children: markdownInlineRuns(paragraphLines.join('\n')),
-        spacing: { after: 150 },
-      }),
-    )
-  }
-  const doc = new Document({ sections: [{ properties: {}, children }] })
-  await fsp.writeFile(outputPath, await Packer.toBuffer(doc))
-}
-
-function markdownInlineRuns(value) {
-  const runs = []
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g
-  let cursor = 0
-  for (const match of String(value).matchAll(pattern)) {
-    if (match.index > cursor) runs.push(new TextRun(String(value).slice(cursor, match.index)))
-    const token = match[0]
-    if (token.startsWith('**')) {
-      runs.push(new TextRun({ text: token.slice(2, -2), bold: true }))
-    } else {
-      runs.push(new TextRun({ text: token.slice(1, -1), font: 'Consolas' }))
-    }
-    cursor = match.index + token.length
-  }
-  if (cursor < String(value).length) runs.push(new TextRun(String(value).slice(cursor)))
-  return runs.length ? runs : [new TextRun(String(value))]
-}
-
-function isMarkdownTableLine(line) {
-  return line.startsWith('|') && line.endsWith('|') && line.split('|').length >= 4
-}
-
-function isMarkdownSeparator(line) {
-  return /^\|?[\s:|-]+\|?$/.test(line) && line.includes('-')
-}
-
-function markdownCells(line) {
-  return line
-    .replace(/^\||\|$/g, '')
-    .split('|')
-    .map((cell) => cell.trim())
-}
-
-function createMarkdownTable(lines) {
-  const rows = lines.map((line) => {
-    const cells = markdownCells(line)
-    return new TableRow({
-      children: cells.map(
-        (cell) =>
-          new TableCell({
-            width: { size: 100 / Math.max(cells.length, 1), type: WidthType.PERCENTAGE },
-            children: [new Paragraph({ children: markdownInlineRuns(cell) })],
-          }),
-      ),
-    })
-  })
-  return new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } })
-}
-
 function looksLikeTable(lines) {
   return lines.length > 1 && lines.every((line) => line.includes('\t') || line.includes('|'))
 }
@@ -2039,50 +1904,8 @@ function textToHtml(text) {
     .join('')
 }
 
-function markdownToHtml(markdown) {
-  const lines = cleanText(markdown).split('\n')
-  const html = []
-  let index = 0
-  while (index < lines.length) {
-    const line = lines[index].trim()
-    if (!line) {
-      index += 1
-      continue
-    }
-    if (isMarkdownTableLine(line)) {
-      const tableLines = []
-      while (index < lines.length && isMarkdownTableLine(lines[index].trim())) {
-        tableLines.push(lines[index].trim())
-        index += 1
-      }
-      const rows = tableLines.filter((item) => !isMarkdownSeparator(item))
-      if (rows.length) {
-        html.push(`<table><tbody>${rows.map((row) => `<tr>${markdownCells(row).map((cell) => `<td>${inlineMarkdownToHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>`)
-      }
-      continue
-    }
-    const heading = line.match(/^(#{1,4})\s+(.+)$/)
-    if (heading) {
-      const level = Math.min(heading[1].length + 1, 5)
-      html.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`)
-    } else if (/^[-*+]\s+/.test(line)) {
-      html.push(`<p>• ${inlineMarkdownToHtml(line.replace(/^[-*+]\s+/, ''))}</p>`)
-    } else if (!/^---+$/.test(line)) {
-      html.push(`<p>${inlineMarkdownToHtml(line)}</p>`)
-    }
-    index += 1
-  }
-  return html.join('') || '<p>未生成内容</p>'
-}
-
 function markdownSourceToHtml(markdown) {
   return `<pre class="markdownSourcePreview">${escapeHtml(normalizeMarkdownSource(markdown))}</pre>`
-}
-
-function inlineMarkdownToHtml(value) {
-  return escapeHtml(value)
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
 }
 
 function escapeHtml(value) {
