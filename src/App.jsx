@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react'
 import {
   Activity,
+  AlertCircle,
   Bot,
+  BookOpenCheck,
+  CheckCircle2,
+  ChevronDown,
   Database,
   Download,
   Factory,
+  FileOutput,
   FileText,
   Languages,
   LogIn,
@@ -12,7 +17,10 @@ import {
   MessageSquare,
   Quote,
   Reply,
+  Save,
+  ScanText,
   Send,
+  Settings2,
   ShieldCheck,
   UploadCloud,
 } from 'lucide-react'
@@ -21,6 +29,8 @@ import './App.css'
 const emptyStats = {
   qaUses: 0,
   translationUses: 0,
+  pdfUses: 0,
+  standardUses: 0,
   active: { day: 0, month: 0, year: 0 },
 }
 
@@ -58,7 +68,13 @@ function App() {
   }
 
   async function openAssistant(nextView) {
-    await api(`/api/usage/${nextView === 'qa' ? 'qa' : 'translation'}`, { method: 'POST' })
+    const usageType = {
+      qa: 'qa',
+      translate: 'translation',
+      pdf: 'pdf',
+      standard1: 'standard',
+    }[nextView]
+    if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST' })
     setView(nextView)
     refreshStats().catch(() => {})
   }
@@ -84,11 +100,17 @@ function App() {
           <button className={view === 'home' ? 'active' : ''} type="button" onClick={() => setView('home')}>
             <Activity size={17} /> 首页
           </button>
-          <button className={view === 'qa' ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
-            <Bot size={17} /> 问答
+          <button className={view === 'standard1' ? 'active' : ''} type="button" onClick={() => openAssistant('standard1')}>
+            <BookOpenCheck size={17} /> 标准解读
+          </button>
+          <button className={view === 'pdf' ? 'active' : ''} type="button" onClick={() => openAssistant('pdf')}>
+            <FileOutput size={17} /> PDF 转 Word
           </button>
           <button className={view === 'translate' ? 'active' : ''} type="button" onClick={() => openAssistant('translate')}>
             <Languages size={17} /> 翻译
+          </button>
+          <button className={view === 'qa' ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
+            <Bot size={17} /> 问答
           </button>
         </nav>
 
@@ -132,6 +154,8 @@ function App() {
       )}
       {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
+      {view === 'pdf' && <PdfToWordView setNotice={setNotice} />}
+      {view === 'standard1' && <StandardView setNotice={setNotice} />}
       {view === 'admin' && (
         <AdminView
           isAdmin={me.isAdmin}
@@ -168,9 +192,60 @@ function App() {
 function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
   return (
     <>
-      <section className="homeSection">
-        <SectionHeading eyebrow="Core Functions" title="核心功能" />
-        <div className="assistantGrid">
+      <AccordionSection eyebrow="Standard Interpretation" title="标准解读助手">
+        <div className="assistantGrid standardAssistantGrid">
+          <button className="assistantCard standard" type="button" onClick={() => onOpenAssistant('standard1')}>
+            <span className="assistantIcon"><BookOpenCheck size={26} /></span>
+            <span>
+              <strong>标准解读（一厂）</strong>
+              <small>提取标准关键要求并按管理员提示词生成结构化解读。</small>
+            </span>
+          </button>
+          <button className="assistantCard standard pending" type="button" disabled>
+            <span className="assistantIcon"><BookOpenCheck size={26} /></span>
+            <span>
+              <strong>标准解读（二厂）</strong>
+              <small>待一厂版本验证完成后开放。</small>
+            </span>
+            <em>待开放</em>
+          </button>
+          <button className="assistantCard standard pending" type="button" disabled>
+            <span className="assistantIcon"><BookOpenCheck size={26} /></span>
+            <span>
+              <strong>标准解读（三厂）</strong>
+              <small>待一厂版本验证完成后开放。</small>
+            </span>
+            <em>待开放</em>
+          </button>
+        </div>
+      </AccordionSection>
+
+      <AccordionSection eyebrow="Document Conversion" title="PDF转word助手">
+        <div className="assistantGrid singleAssistantGrid">
+          <button className="assistantCard pdf" type="button" onClick={() => onOpenAssistant('pdf')}>
+            <span className="assistantIcon"><FileOutput size={26} /></span>
+            <span>
+              <strong>PDF转word助手</strong>
+              <small>支持文本 PDF 与扫描 PDF，逐页识别、整理排版并生成 Word。</small>
+            </span>
+          </button>
+        </div>
+      </AccordionSection>
+
+      <AccordionSection eyebrow="Document Translation" title="翻译助手">
+        <div className="assistantGrid singleAssistantGrid">
+          <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
+            <span className="assistantIcon"><Languages size={26} /></span>
+            <span>
+              <strong>文档翻译助手</strong>
+              <small>使用内网 Qwen-Lite 模型，支持词库参考、文档对照和 Word 下载。</small>
+            </span>
+          </button>
+        </div>
+      </AccordionSection>
+
+      <AccordionSection eyebrow="Knowledge Service" title="知识助手">
+        <div className="assistantGrid singleAssistantGrid">
           <button className="assistantCard qa" type="button" onClick={() => onOpenAssistant('qa')}>
             <span className="assistantIcon"><Bot size={26} /></span>
             <span>
@@ -178,19 +253,14 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
               <small>知识来源为云盘内相关文档。</small>
             </span>
           </button>
-          <button className="assistantCard translate" type="button" onClick={() => onOpenAssistant('translate')}>
-            <span className="assistantIcon"><Languages size={26} /></span>
-            <span>
-              <strong>翻译助手</strong>
-              <small>基于内网 Qwen3-VL 模型，支持词库参考、文档对照和结果下载。</small>
-            </span>
-          </button>
         </div>
-      </section>
+      </AccordionSection>
 
       <section className="homeSection">
         <SectionHeading eyebrow="Usage Metrics" title="统计指标" />
         <div className="metrics">
+          <MetricCard label="标准解读使用" value={stats.standardUses} icon={<BookOpenCheck size={21} />} tone="teal" />
+          <MetricCard label="PDF 转 Word 使用" value={stats.pdfUses} icon={<FileOutput size={21} />} tone="violet" />
           <MetricCard label="问答助手使用" value={stats.qaUses} icon={<Bot size={21} />} tone="blue" />
           <MetricCard label="翻译助手使用" value={stats.translationUses} icon={<Languages size={21} />} tone="green" />
           <MetricCard label="今日活跃访问" value={stats.active.day} icon={<Activity size={21} />} tone="amber" />
@@ -205,6 +275,22 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
         setNotice={setNotice}
       />
     </>
+  )
+}
+
+function AccordionSection({ eyebrow, title, children }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <section className={`homeSection assistantSection ${open ? 'open' : ''}`}>
+      <button className="accordionHeading" type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <span>
+          <span className="eyebrow">{eyebrow}</span>
+          <strong>{title}</strong>
+        </span>
+        <ChevronDown size={22} />
+      </button>
+      {open && <div className="accordionContent">{children}</div>}
+    </section>
   )
 }
 
@@ -509,6 +595,158 @@ function TranslateView({ setNotice }) {
   )
 }
 
+function PdfToWordView({ setNotice }) {
+  return (
+    <DocumentTaskView
+      title="PDF转word助手"
+      description="上传 PDF 后，系统会逐页识别内容并恢复标题、段落、列表、表格与公式结构。"
+      endpoint="/api/pdf-to-word"
+      accept=".pdf,application/pdf"
+      emptyLabel="选择待转换 PDF"
+      fileHint="支持文本 PDF 与扫描 PDF，单文件最大 200 MB"
+      actionLabel="开始转换"
+      workingLabel="正在转换"
+      icon={<ScanText size={30} />}
+      resultTitle="转换内容预览"
+      setNotice={setNotice}
+    />
+  )
+}
+
+function StandardView({ setNotice }) {
+  return (
+    <DocumentTaskView
+      title="标准解读（一厂）"
+      description="上传 DOCX 标准文件，系统将依据管理员设置的提示词提取关键要求并生成结构化解读。"
+      endpoint="/api/standards/plant-1"
+      accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      emptyLabel="选择待解读 Word 文档"
+      fileHint="支持 DOCX；文档中的 Markdown 表格、公式文本和层级结构会尽量保留"
+      actionLabel="开始解读"
+      workingLabel="正在解读"
+      icon={<BookOpenCheck size={30} />}
+      resultTitle="标准解读预览"
+      setNotice={setNotice}
+    />
+  )
+}
+
+function DocumentTaskView({
+  title,
+  description,
+  endpoint,
+  accept,
+  emptyLabel,
+  fileHint,
+  actionLabel,
+  workingLabel,
+  icon,
+  resultTitle,
+  setNotice,
+}) {
+  const [file, setFile] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [task, setTask] = useState(null)
+
+  const processing = task && ['queued', 'processing'].includes(task.status)
+
+  useEffect(() => {
+    if (!task?.id || !processing) return undefined
+    let active = true
+    async function refreshTask() {
+      try {
+        const data = await api(`/api/document-tasks/${task.id}`)
+        if (!active) return
+        setTask(data.task)
+        if (data.task.status === 'completed') setNotice('文档处理完成')
+        if (data.task.status === 'failed') setNotice(data.task.error || '文档处理失败')
+      } catch (error) {
+        if (active) setNotice(error.message)
+      }
+    }
+    refreshTask()
+    const timer = window.setInterval(refreshTask, 1200)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [task?.id, processing, setNotice])
+
+  async function submit(event) {
+    event.preventDefault()
+    if (!file) {
+      setNotice(emptyLabel)
+      return
+    }
+    const formData = new FormData()
+    formData.append('file', file)
+    setSubmitting(true)
+    setTask(null)
+    try {
+      const data = await api(endpoint, { method: 'POST', body: formData })
+      setTask(data.task)
+      setNotice('文件已上传，开始处理')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section className="workspace documentTaskWorkspace">
+      <div className="taskIntro">
+        <div>
+          <p className="eyebrow">Document Intelligence</p>
+          <h2>{title}</h2>
+        </div>
+        <p>{description}</p>
+      </div>
+
+      <form className="uploadPanel taskUploadPanel" onSubmit={submit}>
+        <label className="uploadZone">
+          {icon}
+          <strong>{file ? file.name : emptyLabel}</strong>
+          <span>{fileHint}</span>
+          <input type="file" accept={accept} onChange={(event) => setFile(event.target.files?.[0] || null)} />
+        </label>
+        <button className="primary" type="submit" disabled={submitting || processing}>
+          <FileOutput size={18} /> {submitting || processing ? `${workingLabel}...` : actionLabel}
+        </button>
+      </form>
+
+      {task && (
+        <section className={`taskProgressPanel ${task.status}`} aria-live="polite">
+          <div className="taskProgressHead">
+            <span>
+              {task.status === 'completed' ? <CheckCircle2 size={20} /> : task.status === 'failed' ? <AlertCircle size={20} /> : <Settings2 size={20} />}
+              <strong>{task.stage}</strong>
+            </span>
+            <b>{task.progress}%</b>
+          </div>
+          <div className="progressTrack"><i style={{ width: `${task.progress}%` }} /></div>
+          {task.error && <p className="formError">{task.error}</p>}
+          {task.metadata?.thinkingVerification && (
+            <p className="thinkingStatus">模型检查：{task.metadata.thinkingVerification}</p>
+          )}
+        </section>
+      )}
+
+      {task?.status === 'completed' && (
+        <>
+          <div className="translationMeta">
+            <span><FileText size={16} /> {task.originalName}</span>
+            <a className="downloadButton" href={task.downloadUrl}>
+              <Download size={17} /> 保存为 Word
+            </a>
+          </div>
+          <DocumentPane title={resultTitle} html={task.previewHtml} />
+        </>
+      )}
+    </section>
+  )
+}
+
 function DocumentPane({ title, html }) {
   return (
     <article className="documentPane">
@@ -520,18 +758,48 @@ function DocumentPane({ title, html }) {
 
 function AdminView({ isAdmin, onRequireLogin, setNotice }) {
   const [glossaries, setGlossaries] = useState([])
+  const [prompts, setPrompts] = useState([])
+  const [audit, setAudit] = useState([])
   const [file, setFile] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [savingPrompt, setSavingPrompt] = useState('')
 
   useEffect(() => {
     if (isAdmin) {
-      loadGlossaries().catch((error) => setNotice(error.message))
+      Promise.all([loadGlossaries(), loadPrompts(), loadAudit()]).catch((error) => setNotice(error.message))
     }
   }, [isAdmin, setNotice])
 
   async function loadGlossaries() {
     const data = await api('/api/glossaries')
     setGlossaries(data.items || [])
+  }
+
+  async function loadPrompts() {
+    const data = await api('/api/admin/prompts')
+    setPrompts(data.items || [])
+  }
+
+  async function loadAudit() {
+    const data = await api('/api/admin/model-audit?limit=20')
+    setAudit(data.items || [])
+  }
+
+  async function savePrompt(item) {
+    setSavingPrompt(item.assistantId)
+    try {
+      await api(`/api/admin/prompts/${item.assistantId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: item.prompt }),
+      })
+      await loadPrompts()
+      setNotice('提示词已保存')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setSavingPrompt('')
+    }
   }
 
   async function uploadGlossary(event) {
@@ -600,6 +868,65 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             </div>
           </article>
         ))}
+      </section>
+
+      <section className="promptSettings">
+        <div className="sectionTitle">
+          <div>
+            <p className="eyebrow">Assistant Instructions</p>
+            <h2>标准解读提示词</h2>
+          </div>
+          <span>{prompts.length} 个</span>
+        </div>
+        <div className="promptGrid">
+          {prompts.map((item, index) => (
+            <article className="promptEditor" key={item.assistantId}>
+              <div>
+                <strong>标准解读（{['一厂', '二厂', '三厂'][index] || index + 1}）</strong>
+                {index > 0 && <span>功能待开放，提示词可提前配置</span>}
+              </div>
+              <textarea
+                rows={10}
+                value={item.prompt}
+                onChange={(event) => setPrompts((current) => current.map((prompt) =>
+                  prompt.assistantId === item.assistantId ? { ...prompt, prompt: event.target.value } : prompt,
+                ))}
+              />
+              <button className="primary small" type="button" disabled={savingPrompt === item.assistantId} onClick={() => savePrompt(item)}>
+                <Save size={15} /> {savingPrompt === item.assistantId ? '保存中...' : '保存提示词'}
+              </button>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="modelAudit">
+        <div className="sectionTitle">
+          <div>
+            <p className="eyebrow">Thinking Audit</p>
+            <h2>模型思考模式检查</h2>
+          </div>
+          <button className="ghost small" type="button" onClick={() => loadAudit().catch((error) => setNotice(error.message))}>
+            刷新
+          </button>
+        </div>
+        <p className="auditHelp">每次模型调用均请求关闭思考。这里检查返回中是否仍包含 reasoning 字段或 think 标签，不记录文档正文和密钥。</p>
+        <div className="auditList">
+          {audit.length === 0 && <p className="empty">暂无模型调用记录。</p>}
+          {audit.map((item, index) => {
+            const passed = !item.responseHasReasoning && !item.contentContainsThinkTag
+            return (
+              <article className={`auditItem ${passed ? 'passed' : 'warning'}`} key={`${item.timestamp}-${index}`}>
+                {passed ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+                <div>
+                  <strong>{item.purpose}</strong>
+                  <span>{formatTime(item.timestamp)} · {item.model} · {item.status}</span>
+                </div>
+                <b>{passed ? '未发现思考内容' : '发现思考标记'}</b>
+              </article>
+            )
+          })}
+        </div>
       </section>
     </section>
   )

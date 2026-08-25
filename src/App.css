@@ -23,7 +23,7 @@
   top: 12px;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto minmax(220px, 1fr);
+  grid-template-columns: minmax(220px, auto) minmax(420px, 1fr) minmax(250px, auto);
   align-items: center;
   gap: 16px;
   min-height: 72px;
@@ -79,6 +79,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.nav {
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 .adminControls {
@@ -184,7 +189,7 @@ h2 {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -243,6 +248,18 @@ h2 {
   background: var(--slate-soft);
 }
 
+.metric.teal .metricIcon,
+.assistantCard.standard .assistantIcon {
+  color: #087f8c;
+  background: #e2f7f7;
+}
+
+.metric.violet .metricIcon,
+.assistantCard.pdf .assistantIcon {
+  color: #7157b9;
+  background: #f0ebff;
+}
+
 .assistantGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -250,6 +267,7 @@ h2 {
 }
 
 .assistantCard {
+  position: relative;
   display: grid;
   grid-template-columns: auto 1fr;
   align-items: center;
@@ -259,6 +277,30 @@ h2 {
   border-radius: 8px;
   color: var(--ink);
   text-align: left;
+}
+
+.assistantCard.pending {
+  opacity: 0.72;
+}
+
+.assistantCard.pending em {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--slate-soft);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.standardAssistantGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.singleAssistantGrid {
+  grid-template-columns: minmax(0, 760px);
 }
 
 .assistantIcon {
@@ -301,6 +343,54 @@ h2 {
 
 .homeSectionTitle h2 {
   font-size: 24px;
+}
+
+.assistantSection {
+  padding: 0;
+  overflow: hidden;
+}
+
+.accordionHeading {
+  width: 100%;
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 22px;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+
+.accordionHeading > span,
+.accordionHeading .eyebrow {
+  display: block;
+}
+
+.accordionHeading strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 24px;
+}
+
+.accordionHeading svg {
+  flex: 0 0 auto;
+  color: var(--blue);
+  transition: transform 180ms ease;
+}
+
+.assistantSection.open .accordionHeading svg {
+  transform: rotate(180deg);
+}
+
+.assistantSection.open .accordionHeading {
+  border-bottom: 1px solid var(--line);
+}
+
+.accordionContent {
+  padding: 18px 22px 22px;
 }
 
 .sectionTitle {
@@ -542,6 +632,91 @@ h2 {
   gap: 18px;
 }
 
+.documentTaskWorkspace {
+  display: grid;
+  gap: 18px;
+}
+
+.taskIntro {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.7fr) minmax(320px, 1.3fr);
+  align-items: end;
+  gap: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.taskIntro > p {
+  color: var(--muted);
+}
+
+.taskUploadPanel {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.taskProgressPanel {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbfe;
+}
+
+.taskProgressPanel.completed {
+  border-color: #a9ddce;
+  background: #f0fbf7;
+}
+
+.taskProgressPanel.failed {
+  border-color: #efb4ae;
+  background: #fff6f5;
+}
+
+.taskProgressHead,
+.taskProgressHead > span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.taskProgressHead {
+  justify-content: space-between;
+}
+
+.taskProgressHead svg {
+  color: var(--blue);
+}
+
+.taskProgressPanel.completed .taskProgressHead svg {
+  color: var(--green);
+}
+
+.taskProgressPanel.failed .taskProgressHead svg {
+  color: #b42318;
+}
+
+.progressTrack {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: #dfe8f2;
+}
+
+.progressTrack i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+  transition: width 350ms ease;
+}
+
+.thinkingStatus,
+.auditHelp {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .uploadPanel {
   display: grid;
   grid-template-columns: 1fr auto auto;
@@ -691,6 +866,93 @@ h2 {
   gap: 12px;
 }
 
+.promptSettings,
+.modelAudit {
+  display: grid;
+  gap: 14px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.promptGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.promptEditor {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.promptEditor > div strong,
+.promptEditor > div span {
+  display: block;
+}
+
+.promptEditor > div span {
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.promptEditor textarea {
+  width: 100%;
+  min-height: 250px;
+  padding: 11px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fbfdff;
+  outline: none;
+}
+
+.promptEditor button {
+  justify-self: start;
+}
+
+.auditList {
+  display: grid;
+  gap: 8px;
+}
+
+.auditItem {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.auditItem.passed > svg,
+.auditItem.passed > b {
+  color: var(--green);
+}
+
+.auditItem.warning > svg,
+.auditItem.warning > b {
+  color: #b42318;
+}
+
+.auditItem span {
+  display: block;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.auditItem > b {
+  font-size: 13px;
+}
+
 .glossaryItem {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -769,6 +1031,8 @@ h2 {
 
   .metrics,
   .assistantGrid,
+  .standardAssistantGrid,
+  .promptGrid,
   .compareGrid {
     grid-template-columns: 1fr;
   }
@@ -779,6 +1043,11 @@ h2 {
 
   .translationMeta {
     display: grid;
+  }
+
+  .taskIntro {
+    grid-template-columns: 1fr;
+    align-items: start;
   }
 }
 
@@ -795,6 +1064,19 @@ h2 {
     padding: 14px;
   }
 
+  .assistantSection {
+    padding: 0;
+  }
+
+  .accordionHeading {
+    min-height: 76px;
+    padding: 14px;
+  }
+
+  .accordionContent {
+    padding: 14px;
+  }
+
   .brand small {
     display: none;
   }
@@ -804,6 +1086,16 @@ h2 {
   .chatComposer {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .auditItem {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .taskProgressHead {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .assistantCard,

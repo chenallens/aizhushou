@@ -1,6 +1,6 @@
 # AI助手网页服务
 
-内置“制造一厂知识问答AI助手”和“翻译助手”的本地/内网 Web 服务。
+面向制造内网的 AI 助手服务台，包含知识问答、文档翻译、PDF 转 Word 和标准解读功能。
 
 ## 本地启动
 
@@ -18,7 +18,9 @@
    - `QA_AUTH_CLIENT_ID` / `QA_AUTH_CLIENT_SECRET`：调用 `/api/authentication/v1/access_token` 所需的 Basic Auth 信息。
    - `QA_DEFAULT_ACCOUNT`：可选，仅用于不是从 OA 入口访问时的本地测试账号。
    - `QA_TLS_REJECT_UNAUTHORIZED=false`：仅当内网知识问答平台证书不被 Node.js 信任时用于测试。
-   - `TRANSLATION_API_URL`：默认已填内网 Qwen3-VL 接口。
+   - `AI_MODEL_API_URL`：翻译、PDF 转 Word和标准解读共用的内网模型接口。
+   - `AI_MODEL_NAME`：模型名称，当前为 `Qwen-Lite`。
+   - `AI_MODEL_API_KEY`：模型接口 Bearer 密钥。
    - 外网调试界面时可临时设置 `MOCK_AI=true`。
 
 3. 启动开发服务：
@@ -62,7 +64,21 @@ http://服务器IP:4178
 - 词库文件：`storage/glossaries`
 - PDF 转换与中间文件：`storage/converted`
 - 翻译结果 Word：`storage/results`
+- 模型思考模式审计：`storage/logs/model-audit.log`
+
+## 新增助手
+
+- PDF 转 Word：逐页提取 PDF 文本；文本过少时自动将该页渲染为图片交给模型识别，完成后生成可下载的 DOCX。
+- 标准解读（一厂）：读取 DOCX 文档，依据管理员维护的提示词分段解读并生成 DOCX。
+- 标准解读（二厂）和（三厂）：当前保留入口与独立提示词配置，功能将在一厂版本验证后开放。
+- 管理员页面可编辑三个标准解读提示词，并检查最近模型响应是否包含 reasoning 字段或 `<think>` 标签。
+
+共享模型的每次请求都会发送：
+
+```json
+"chat_template_kwargs": { "enable_thinking": false }
+```
 
 ## 当前文档处理边界
 
-第一版支持 PDF 与 DOCX。DOCX 会尽量保留可解析的段落、表格 HTML 结构用于页面对照；PDF 按文本提取后生成 Word，不保证复杂版式像素级一致。.doc 文件请先另存为 .docx 后上传。
+DOCX 会尽量保留可解析的段落与表格结构。PDF 转 Word 会恢复标题、列表、表格和公式文本，但不承诺与原 PDF 像素级一致；低质量扫描件中无法确认的字符可能标记为“无法辨认”。`.doc` 文件请先另存为 `.docx` 后上传。
