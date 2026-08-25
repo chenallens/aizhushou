@@ -56,6 +56,7 @@ const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, uploadDir),
     filename: (_req, file, cb) => {
+      file.originalname = decodeUploadFilename(file.originalname)
       const ext = path.extname(file.originalname || '').toLowerCase()
       cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`)
     },
@@ -486,10 +487,9 @@ app.get('/api/document-tasks/:id/download', (req, res) => {
     res.status(404).json({ error: '结果文件不存在' })
     return
   }
-  const suffix = task.type === 'pdf-to-word' ? '转换结果' : '标准解读'
-  const baseName = path.parse(task.originalName).name
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${baseName}-${suffix}.docx`)}`)
-  res.download(filePath)
+  const baseName = path.parse(decodeUploadFilename(task.originalName)).name
+  const downloadName = task.type === 'pdf-to-word' ? `${baseName}.docx` : `${baseName}-标准解读.docx`
+  res.download(filePath, downloadName)
 })
 
 app.get('/api/translations/:id/download', (req, res) => {
@@ -707,6 +707,13 @@ function normalizeMessages(body) {
 function normalizeBaseUrl(value) {
   const trimmed = String(value || '').trim()
   return trimmed ? trimmed.replace(/\/+$/, '') : ''
+}
+
+function decodeUploadFilename(value) {
+  const original = String(value || '').trim()
+  if (!original || [...original].some((char) => char.codePointAt(0) > 255)) return original
+  const decoded = Buffer.from(original, 'latin1').toString('utf8')
+  return decoded.includes('\uFFFD') ? original : decoded
 }
 
 function buildJsonHeaders(token) {
@@ -1121,6 +1128,7 @@ function getDocumentTask(id) {
   }
   return {
     ...row,
+    originalName: decodeUploadFilename(row.originalName),
     progress: Number(row.progress || 0),
     metadata,
     downloadUrl: row.status === 'completed' ? `/api/document-tasks/${row.id}/download` : null,
@@ -1213,8 +1221,9 @@ async function processPdfToWordTask(taskId) {
           mockContent: `## 第 ${pageNumber} 页\n\n[模拟模式：该页需要内网模型进行图像识别]`,
         })
       }
-      diagnostics.push(result.diagnostics)
-      renderedPages.push(stripModelThinking(result.content))
+      const normalized = await ensurePureMarkdown(result.content, pageNumber)
+      diagnostics.push(result.diagnostics, ...normalized.diagnostics)
+      renderedPages.push(normalized.content)
       updateDocumentTask(taskId, {
         progress: Math.floor(10 + ((index + 1) / pages.length) * 78),
         stage: `已完成第 ${pageNumber}/${pages.length} 页`,
@@ -1224,8 +1233,7 @@ async function processPdfToWordTask(taskId) {
     updateDocumentTask(taskId, { progress: 92, stage: '正在生成 Word 文档' })
     const markdown = renderedPages.join('\n\n---\n\n')
     const resultName = `${Date.now()}-${crypto.randomUUID()}-pdf-to-word.docx`
-    await createDocxFromMarkdown({
-      title: `${path.parse(task.originalName).name} 转换结果`,
+    await createDocxFromMarkdownSource({
       markdown,
       outputPath: path.join(resultsDir, resultName),
     })
@@ -1234,7 +1242,7 @@ async function processPdfToWordTask(taskId) {
       progress: 100,
       stage: '转换完成，可以下载 Word',
       resultName,
-      previewHtml: markdownToHtml(markdown),
+      previewHtml: markdownSourceToHtml(markdown),
       metadata: buildTaskDiagnostics({ diagnostics, totalPages: pages.length }),
       error: null,
     })
@@ -1306,7 +1314,8 @@ function buildPdfTextPrompt(text, pageNumber, totalPages) {
   return [
     '你是专业的 PDF 转 Word 文档识别与排版助手。',
     `以下是第 ${pageNumber}/${totalPages} 页提取出的文本。请纠正明显的断行和识别错误，并恢复标题、段落、编号、列表、表格和公式结构。`,
-    '只输出该页整理后的 Markdown 正文。不得总结、删减或编造内容；数值、单位、公式和专有名词必须忠于原文。',
+    '只输出该页整理后的纯 Markdown 源文本。所有表格必须使用 Markdown 管道表格，不要输出 HTML/XML 标签，不要用代码围栏包裹整篇内容，不要输出图片占位链接。',
+    '不得总结、删减或编造内容；数值、单位、公式和专有名词必须忠于原文。',
     text,
   ].join('\n\n')
 }
@@ -1314,9 +1323,45 @@ function buildPdfTextPrompt(text, pageNumber, totalPages) {
 function buildPdfImagePrompt(pageNumber, totalPages) {
   return [
     `请识别这张 PDF 第 ${pageNumber}/${totalPages} 页的全部可见内容，并恢复适合 Word 的排版。`,
-    '输出 Markdown 正文，保留标题、段落、编号、列表、表格、公式、数值和单位。',
+    '输出纯 Markdown 源文本，保留标题、段落、编号、列表、表格、公式、数值和单位。',
+    '所有表格必须使用 Markdown 管道表格，不要输出 HTML/XML 标签，不要用代码围栏包裹整篇内容，不要虚构图片或链接。',
     '扫描质量可能较差；无法确认的字用〔无法辨认〕标记，不得猜测或补写，不要输出解释和思考过程。',
   ].join('\n')
+}
+
+async function ensurePureMarkdown(value, pageNumber) {
+  let content = normalizeMarkdownSource(value)
+  const diagnostics = []
+  if (/<\/?(?:table|tr|td|th|div|p|h[1-6]|img|br|span)\b/i.test(content)) {
+    const result = await callSharedModel({
+      purpose: `pdf-markdown-normalize:page-${pageNumber}`,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            '请把下面混合了 HTML 的文档内容改写为纯 Markdown 源文本。',
+            '完整保留文字、数值、公式和表格；HTML 表格必须转换为 Markdown 管道表格。',
+            '不要总结，不要添加内容，不要输出 HTML/XML 标签，也不要用代码围栏包裹整篇内容。',
+            content,
+          ].join('\n\n'),
+        },
+      ],
+      mockContent: content,
+    })
+    diagnostics.push(result.diagnostics)
+    content = normalizeMarkdownSource(result.content)
+  }
+  if (/<\/?(?:table|tr|td|th|div|p|h[1-6]|img|br|span)\b/i.test(content)) {
+    throw new Error(`第 ${pageNumber} 页未能整理为纯 Markdown，请重新转换`)
+  }
+  return { content, diagnostics }
+}
+
+function normalizeMarkdownSource(value) {
+  return stripModelThinking(value)
+    .replace(/^\s*```(?:markdown|md)?\s*\n/i, '')
+    .replace(/\n\s*```\s*$/i, '')
+    .trim()
 }
 
 function buildTaskDiagnostics({ diagnostics, ...counts }) {
@@ -1398,6 +1443,19 @@ async function createDocxFromText({ title, text, outputPath, direction, glossary
   const doc = new Document({
     sections: [{ properties: {}, children }],
   })
+  await fsp.writeFile(outputPath, await Packer.toBuffer(doc))
+}
+
+async function createDocxFromMarkdownSource({ markdown, outputPath }) {
+  const lines = String(markdown || '').replace(/\r/g, '').split('\n')
+  const children = lines.map(
+    (line) =>
+      new Paragraph({
+        children: [new TextRun({ text: line, font: 'Microsoft YaHei' })],
+        spacing: { after: 40 },
+      }),
+  )
+  const doc = new Document({ sections: [{ properties: {}, children }] })
   await fsp.writeFile(outputPath, await Packer.toBuffer(doc))
 }
 
@@ -1613,6 +1671,10 @@ function markdownToHtml(markdown) {
     index += 1
   }
   return html.join('') || '<p>未生成内容</p>'
+}
+
+function markdownSourceToHtml(markdown) {
+  return `<pre class="markdownSourcePreview">${escapeHtml(normalizeMarkdownSource(markdown))}</pre>`
 }
 
 function inlineMarkdownToHtml(value) {
