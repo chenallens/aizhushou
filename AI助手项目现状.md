@@ -12,7 +12,7 @@
 - 最后更新时间：2026-09-04
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.119`
 - 当前访问地址：`http://172.28.200.119/`
-- 当前状态：内网服务器版本已测试并正常访问；源码已新增管理员面板折叠功能，本次尚未重新生成 Windows + Nginx 发布包。
+- 当前状态：管理员面板折叠功能已完成，并已生成 2026-09-04 Windows + Nginx 发布包；该新包尚待复制到内网服务器升级。
 
 ## 2. 项目目标
 
@@ -405,9 +405,13 @@ npm run build
 ### 14.1 当前发布包
 
 - Nginx 目录：`E:\Qwen-cc\nginx-1.23.2`
-- 发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows.zip`
+- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260904.zip`
+- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows.zip`（保留用于回退）
 - 发布包内置 Node.js：`v20.19.5`
 - 发布包说明：`AI_ASSISTANT_DEPLOYMENT.txt`
+- 最新包功能提交：`29a7625`
+- 最新包大小：约 `102.54 MB`
+- 最新包 SHA-256：`9A6119905B07CBC25DB3A921D53E1024AF5D843E4E3956376B2F5C528E72BD94`
 
 发布结构概要：
 
@@ -547,7 +551,7 @@ app/aizhushou/storage/
 - 数据或配置影响：无，不涉及数据库和 `.env`。
 - 验证：`npm run lint`、`npm run build` 通过；Edge 自动化验证桌面端三块默认收起且可独立展开，390px 移动端无横向溢出。
 - Git 提交：`29a7625`。
-- 部署包：本次尚未重新生成，服务器仍运行上一版发布包。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260904.zip`；Nginx 配置检查、首页静态资源和 `/api/health` 反向代理联调通过，新包尚待部署到服务器。
 
 ### 后续记录模板
 
