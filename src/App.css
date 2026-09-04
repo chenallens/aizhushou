@@ -1061,14 +1061,95 @@ h2 {
   color: var(--blue);
 }
 
+.adminCollapsibleSection {
+  display: grid;
+  gap: 0;
+}
+
+.adminSectionToggle {
+  width: 100%;
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 0;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+
+.adminSectionToggle > span:first-child,
+.adminSectionToggle .eyebrow {
+  display: block;
+}
+
+.adminSectionToggle strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+
+.adminSectionToggleCue {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.adminSectionCount {
+  min-width: 56px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  text-align: center;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.adminSectionToggleLabel {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.adminSectionToggle svg {
+  color: var(--blue);
+  transition: transform 180ms ease;
+}
+
+.adminCollapsibleSection.open .adminSectionToggle svg {
+  transform: rotate(180deg);
+}
+
+.adminSectionToggle:hover strong,
+.adminSectionToggle:focus-visible strong {
+  color: var(--blue);
+}
+
+.adminSectionToggle:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid rgba(24, 119, 242, 0.34);
+  outline-offset: 3px;
+}
+
+.adminSectionContent {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 2px;
+}
+
+.adminSectionContent[hidden] {
+  display: none;
+}
+
 .glossaryList {
   display: grid;
   gap: 12px;
 }
 
 .glossaryManager {
-  display: grid;
-  gap: 14px;
+  min-width: 0;
 }
 
 .glossaryHelp {
@@ -1177,10 +1258,23 @@ h2 {
 
 .promptSettings,
 .modelAudit {
-  display: grid;
-  gap: 14px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
+}
+
+.auditControls {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.auditControls .auditHelp {
+  flex: 1;
+}
+
+.auditControls button {
+  flex: 0 0 auto;
 }
 
 .promptGrid {
@@ -1436,6 +1530,31 @@ h2 {
   .auditItem {
     grid-template-columns: 1fr;
     justify-items: start;
+  }
+
+  .adminSectionToggle {
+    min-height: 66px;
+  }
+
+  .adminSectionToggleCue {
+    gap: 7px;
+  }
+
+  .adminSectionToggleLabel {
+    display: none;
+  }
+
+  .adminSectionCount {
+    min-width: 0;
+  }
+
+  .auditControls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .auditControls button {
+    align-self: flex-start;
   }
 
   .taskProgressHead {

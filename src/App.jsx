@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   Quote,
+  RefreshCw,
   Reply,
   Save,
   ScanText,
@@ -890,6 +891,35 @@ function DocumentPane({ title, html }) {
   )
 }
 
+function AdminCollapsibleSection({ className, sectionId, eyebrow, title, summary, open, onToggle, children }) {
+  const contentId = `${sectionId}-content`
+
+  return (
+    <section className={`${className} adminCollapsibleSection ${open ? 'open' : ''}`}>
+      <button
+        className="adminSectionToggle"
+        type="button"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={onToggle}
+      >
+        <span>
+          <span className="eyebrow">{eyebrow}</span>
+          <strong>{title}</strong>
+        </span>
+        <span className="adminSectionToggleCue">
+          {summary && <span className="adminSectionCount">{summary}</span>}
+          <span className="adminSectionToggleLabel">{open ? '收起' : '展开'}</span>
+          <ChevronDown size={20} />
+        </span>
+      </button>
+      <div className="adminSectionContent" id={contentId} hidden={!open}>
+        {children}
+      </div>
+    </section>
+  )
+}
+
 function AdminView({ isAdmin, onRequireLogin, setNotice }) {
   const [terms, setTerms] = useState([])
   const [prompts, setPrompts] = useState([])
@@ -898,6 +928,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
   const [editingTermId, setEditingTermId] = useState(null)
   const [savingTerm, setSavingTerm] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState('')
+  const [expandedSections, setExpandedSections] = useState({ glossary: false, prompts: false, audit: false })
 
   useEffect(() => {
     if (isAdmin) {
@@ -967,6 +998,10 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
     setTermForm({ zhTerm: '', enTerm: '', note: '' })
   }
 
+  function toggleSection(section) {
+    setExpandedSections((current) => ({ ...current, [section]: !current[section] }))
+  }
+
   async function deleteTerm(item) {
     if (!window.confirm(`确定删除术语“${item.zhTerm} / ${item.enTerm}”吗？`)) return
     try {
@@ -994,14 +1029,15 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
 
   return (
     <section className="workspace adminWorkspace">
-      <section className="glossaryManager">
-        <div className="sectionTitle">
-          <div>
-            <p className="eyebrow">Terminology Assets</p>
-            <h2>翻译术语词库</h2>
-          </div>
-          <span>{terms.length} 条</span>
-        </div>
+      <AdminCollapsibleSection
+        className="glossaryManager"
+        sectionId="admin-glossary"
+        eyebrow="Terminology Assets"
+        title="翻译术语词库"
+        summary={`${terms.length} 条`}
+        open={expandedSections.glossary}
+        onToggle={() => toggleSection('glossary')}
+      >
         <p className="glossaryHelp">每条术语会自动同步到后台 Markdown 词库，供翻译助手在直译后进行校订与润色。</p>
         <form className="termEditor" onSubmit={saveTerm}>
           <label>
@@ -1046,16 +1082,17 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             </article>
           ))}
         </div>
-      </section>
+      </AdminCollapsibleSection>
 
-      <section className="promptSettings">
-        <div className="sectionTitle">
-          <div>
-            <p className="eyebrow">Assistant Instructions</p>
-            <h2>标准解读提示词</h2>
-          </div>
-          <span>{prompts.length} 个</span>
-        </div>
+      <AdminCollapsibleSection
+        className="promptSettings"
+        sectionId="admin-prompts"
+        eyebrow="Assistant Instructions"
+        title="标准解读提示词"
+        summary={`${prompts.length} 个`}
+        open={expandedSections.prompts}
+        onToggle={() => toggleSection('prompts')}
+      >
         <div className="promptGrid">
           {prompts.map((item, index) => (
             <article className="promptEditor" key={item.assistantId}>
@@ -1076,19 +1113,23 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             </article>
           ))}
         </div>
-      </section>
+      </AdminCollapsibleSection>
 
-      <section className="modelAudit">
-        <div className="sectionTitle">
-          <div>
-            <p className="eyebrow">Thinking Audit</p>
-            <h2>模型思考模式检查</h2>
-          </div>
+      <AdminCollapsibleSection
+        className="modelAudit"
+        sectionId="admin-model-audit"
+        eyebrow="Thinking Audit"
+        title="模型思考模式检查"
+        summary={`${audit.length} 条记录`}
+        open={expandedSections.audit}
+        onToggle={() => toggleSection('audit')}
+      >
+        <div className="auditControls">
+          <p className="auditHelp">每次模型调用均请求关闭思考。这里检查返回中是否仍包含 reasoning 字段或 think 标签，不记录文档正文和密钥。</p>
           <button className="ghost small" type="button" onClick={() => loadAudit().catch((error) => setNotice(error.message))}>
-            刷新
+            <RefreshCw size={15} /> 刷新
           </button>
         </div>
-        <p className="auditHelp">每次模型调用均请求关闭思考。这里检查返回中是否仍包含 reasoning 字段或 think 标签，不记录文档正文和密钥。</p>
         <div className="auditList">
           {audit.length === 0 && <p className="empty">暂无模型调用记录。</p>}
           {audit.map((item, index) => {
@@ -1105,7 +1146,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             )
           })}
         </div>
-      </section>
+      </AdminCollapsibleSection>
     </section>
   )
 }
