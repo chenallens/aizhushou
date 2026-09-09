@@ -12,7 +12,7 @@
 - 最后更新时间：2026-09-09
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.66`
 - 当前访问地址：`http://172.28.200.66/`
-- 当前状态：管理员面板折叠功能已完成，并已生成 2026-09-04 Windows + Nginx 发布包；该新包尚待复制到内网服务器升级。
+- 当前状态：2026-09-04 Windows + Nginx 发布包已部署到 `172.28.200.66`，用户已确认内网访问正常。
 
 ## 2. 项目目标
 
@@ -431,7 +431,7 @@ nginx-1.23.2/
 
 1. 将完整 Nginx 目录复制到服务器，例如 `D:\nginx-1.23.2`。
 2. 检查 `D:\nginx-1.23.2\app\aizhushou\.env`。
-3. 双击 `start-ai-assistant.bat`。
+3. 以管理员身份运行 `start-aizhushou.bat`。
 4. 在服务器本机访问 `http://127.0.0.1/`。
 5. 在其他内网电脑访问 `http://172.28.200.66/`。
 
@@ -551,7 +551,7 @@ app/aizhushou/storage/
 - 数据或配置影响：无，不涉及数据库和 `.env`。
 - 验证：`npm run lint`、`npm run build` 通过；Edge 自动化验证桌面端三块默认收起且可独立展开，390px 移动端无横向溢出。
 - Git 提交：`29a7625`。
-- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260904.zip`；Nginx 配置检查、首页静态资源和 `/api/health` 反向代理联调通过，新包尚待部署到服务器。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260904.zip`；Nginx 配置检查、首页静态资源和 `/api/health` 反向代理联调通过，现已部署到 `172.28.200.66`。
 
 ### 2026-09-09 - 更新内网服务器地址
 
@@ -561,6 +561,15 @@ app/aizhushou/storage/
 - 验证：检查 Nginx、Express、前端和环境变量示例，旧 IP 仅存在于说明文档中。
 - Git 提交：见本次文档提交。
 - 部署包：`aizhushou-nginx-windows-20260904.zip` 可直接部署到新服务器，不需要因 IP 变化重新生成。
+
+### 2026-09-09 - 解决默认 Nginx 欢迎页问题
+
+- 现象：其他内网电脑访问 `172.28.200.66` 时显示默认的 `Welcome to nginx!` 页面，而不是 AI 助手主页。
+- 原因：服务器中旧的 Nginx 进程或 Windows 服务占用了 80 端口，并加载默认站点配置；不是防火墙或新服务器 IP 导致。
+- 处理：停止旧 Nginx 服务和进程，确认发布包配置中的 `root html/aizhushou;`，再以管理员身份运行 `start-aizhushou.bat`。
+- 数据或配置影响：无，未修改 `.env` 或 `storage`。
+- 验证：用户已确认处理后内网访问恢复正常。
+- 部署包：无需重新生成。
 
 ### 后续记录模板
 
