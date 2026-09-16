@@ -294,7 +294,6 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onRagflowOpen, on
           <MetricCard label="制造四厂问答使用" value={stats.ragflowUses} icon={<Database size={21} />} tone="ragflow" />
           <MetricCard label="翻译助手使用" value={stats.translationUses} icon={<Languages size={21} />} tone="green" />
           <MetricCard label="今日活跃访问" value={stats.active.day} icon={<Activity size={21} />} tone="amber" />
-          <MetricCard label="本月 / 本年活跃" value={`${stats.active.month} / ${stats.active.year}`} icon={<Database size={21} />} tone="slate" />
         </div>
       </section>
 
