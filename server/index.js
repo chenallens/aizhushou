@@ -89,6 +89,17 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
 })
 
+app.get('/api/assistant-config', (_req, res) => {
+  const ragflowUrl = String(process.env.RAGFLOW_CHAT_URL || '').trim()
+  res.json({
+    ragflow: {
+      enabled: Boolean(ragflowUrl),
+      name: String(process.env.RAGFLOW_CHAT_NAME || '制造四厂知识问答助手').trim(),
+      url: ragflowUrl,
+    },
+  })
+})
+
 app.get('/api/me', (req, res) => {
   res.json({ isAdmin: Boolean(req.session?.isAdmin), username: req.session?.username || null })
 })
@@ -118,6 +129,7 @@ app.post('/api/visit', (_req, res) => {
 app.post('/api/usage/:assistant', (req, res) => {
   const map = {
     qa: 'qa_click',
+    ragflow: 'ragflow_click',
     translation: 'translation_click',
     pdf: 'pdf_click',
     standard: 'standard_click',
@@ -847,8 +859,12 @@ function getStats() {
   const events = all('SELECT type, created_at AS createdAt FROM events')
   const today = new Date()
   const visits = events.filter((event) => event.type === 'visit')
+  const qaNativeUses = events.filter((event) => event.type === 'qa_click').length
+  const ragflowUses = events.filter((event) => event.type === 'ragflow_click').length
   return {
-    qaUses: events.filter((event) => event.type === 'qa_click').length,
+    qaUses: qaNativeUses + ragflowUses,
+    qaNativeUses,
+    ragflowUses,
     translationUses: events.filter((event) => event.type === 'translation_click').length,
     pdfUses: events.filter((event) => event.type === 'pdf_click').length,
     standardUses: events.filter((event) => event.type === 'standard_click').length,

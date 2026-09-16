@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Database,
   Download,
+  ExternalLink,
   Factory,
   FileWarning,
   FileOutput,
@@ -33,6 +34,8 @@ import './App.css'
 
 const emptyStats = {
   qaUses: 0,
+  qaNativeUses: 0,
+  ragflowUses: 0,
   translationUses: 0,
   pdfUses: 0,
   standardUses: 0,
@@ -75,6 +78,7 @@ function App() {
   async function openAssistant(nextView) {
     const usageType = {
       qa: 'qa',
+      ragflow: 'ragflow',
       translate: 'translation',
       pdf: 'pdf',
       standard1: 'standard',
@@ -116,7 +120,7 @@ function App() {
           <button className={view === 'translate' ? 'active' : ''} type="button" onClick={() => openAssistant('translate')}>
             <Languages size={17} /> 翻译
           </button>
-          <button className={view === 'qa' ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
+          <button className={view === 'qa' || view === 'ragflow' ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
             <Bot size={17} /> 问答
           </button>
         </nav>
@@ -159,7 +163,8 @@ function App() {
           setNotice={setNotice}
         />
       )}
-      {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
+      {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} onSelectAssistant={openAssistant} />}
+      {view === 'ragflow' && <RagflowView setNotice={setNotice} onSelectAssistant={openAssistant} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
       {view === 'pdf' && <PdfToWordView setNotice={setNotice} />}
       {view === 'standard1' && <StandardView plant={1} setNotice={setNotice} />}
@@ -252,12 +257,19 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
       </AccordionSection>
 
       <AccordionSection eyebrow="Knowledge Service" title="知识助手">
-        <div className="assistantGrid singleAssistantGrid">
+        <div className="assistantGrid knowledgeAssistantGrid">
           <button className="assistantCard qa" type="button" onClick={() => onOpenAssistant('qa')}>
             <span className="assistantIcon"><Bot size={26} /></span>
             <span>
               <strong>制造一厂知识问答AI助手</strong>
               <small>知识来源为云盘内相关文档。</small>
+            </span>
+          </button>
+          <button className="assistantCard ragflow" type="button" onClick={() => onOpenAssistant('ragflow')}>
+            <span className="assistantIcon"><Database size={26} /></span>
+            <span>
+              <strong>制造四厂知识问答助手</strong>
+              <small>知识来源为制造四厂 RAGFlow 知识库。</small>
             </span>
           </button>
         </div>
@@ -396,7 +408,32 @@ function FeedbackBoard({ items, isAdmin, onReplySaved, setNotice }) {
   )
 }
 
-function QaView({ setNotice, oaCode }) {
+function KnowledgeAssistantTabs({ active, onSelect }) {
+  return (
+    <div className="knowledgeAssistantTabs" role="tablist" aria-label="选择知识问答助手">
+      <button
+        className={active === 'qa' ? 'active' : ''}
+        type="button"
+        role="tab"
+        aria-selected={active === 'qa'}
+        onClick={() => active !== 'qa' && onSelect('qa')}
+      >
+        <Bot size={17} /> 制造一厂知识问答
+      </button>
+      <button
+        className={active === 'ragflow' ? 'active' : ''}
+        type="button"
+        role="tab"
+        aria-selected={active === 'ragflow'}
+        onClick={() => active !== 'ragflow' && onSelect('ragflow')}
+      >
+        <Database size={17} /> 制造四厂知识问答
+      </button>
+    </div>
+  )
+}
+
+function QaView({ setNotice, oaCode, onSelectAssistant }) {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: '你好，我是制造一厂知识问答AI助手。' },
   ])
@@ -456,6 +493,7 @@ function QaView({ setNotice, oaCode }) {
 
   return (
     <section className="workspace qaWorkspace">
+      <KnowledgeAssistantTabs active="qa" onSelect={onSelectAssistant} />
       <div className="chatRail">
         {messages.map((message, index) => (
           <div className={`chatMessage ${message.role}`} key={`${message.role}-${index}`}>
@@ -488,6 +526,96 @@ function QaView({ setNotice, oaCode }) {
           <Send size={18} /> 发送
         </button>
       </form>
+    </section>
+  )
+}
+
+function RagflowView({ setNotice, onSelectAssistant }) {
+  const [config, setConfig] = useState({ loading: true, name: '制造四厂知识问答助手', url: '' })
+  const [frameKey, setFrameKey] = useState(0)
+  const [frameLoaded, setFrameLoaded] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    api('/api/assistant-config')
+      .then((data) => {
+        if (cancelled) return
+        setConfig({
+          loading: false,
+          name: data.ragflow?.name || '制造四厂知识问答助手',
+          url: data.ragflow?.url || '',
+        })
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setConfig((current) => ({ ...current, loading: false }))
+        setNotice(error.message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [setNotice])
+
+  function reloadFrame() {
+    setFrameLoaded(false)
+    setFrameKey((current) => current + 1)
+  }
+
+  return (
+    <section className="workspace ragflowWorkspace">
+      <KnowledgeAssistantTabs active="ragflow" onSelect={onSelectAssistant} />
+      <div className="ragflowHeader">
+        <div>
+          <p className="eyebrow">RAGFlow Knowledge Service</p>
+          <h2>{config.name}</h2>
+        </div>
+        {config.url && (
+          <div className="ragflowActions">
+            <button className="ghost small" type="button" onClick={reloadFrame} title="重新加载四厂助手">
+              <RefreshCw size={15} /> 重新加载
+            </button>
+            <a className="ghost small" href={config.url} target="_blank" rel="noreferrer" title="在新窗口打开四厂助手">
+              <ExternalLink size={15} /> 新窗口打开
+            </a>
+          </div>
+        )}
+      </div>
+
+      {config.loading && (
+        <div className="ragflowState" role="status">
+          <span className="ragflowLoader" />
+          <strong>正在连接制造四厂知识库...</strong>
+        </div>
+      )}
+
+      {!config.loading && !config.url && (
+        <div className="ragflowState error" role="alert">
+          <AlertCircle size={24} />
+          <strong>制造四厂知识问答助手尚未配置</strong>
+          <span>请检查服务器 .env 中的 RAGFLOW_CHAT_URL，并重启服务。</span>
+        </div>
+      )}
+
+      {!config.loading && config.url && (
+        <div className="ragflowFrameShell">
+          {!frameLoaded && (
+            <div className="ragflowFrameLoading" role="status">
+              <span className="ragflowLoader" />
+              <span>正在载入问答界面...</span>
+            </div>
+          )}
+          <iframe
+            key={frameKey}
+            className="ragflowFrame"
+            src={config.url}
+            title={config.name}
+            loading="eager"
+            allow="clipboard-read; clipboard-write"
+            referrerPolicy="strict-origin-when-cross-origin"
+            onLoad={() => setFrameLoaded(true)}
+          />
+        </div>
+      )}
     </section>
   )
 }
