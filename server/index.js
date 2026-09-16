@@ -159,7 +159,7 @@ app.get('/api/stats', (_req, res) => {
   res.json(getStats())
 })
 
-app.get('/api/feedback', (_req, res) => {
+app.get('/api/feedback', requireAdmin, (_req, res) => {
   const rows = all(
     `SELECT id, content, reply, created_at AS createdAt, replied_at AS repliedAt
      FROM feedback

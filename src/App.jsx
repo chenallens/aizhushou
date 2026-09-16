@@ -54,7 +54,11 @@ function App() {
   useEffect(() => {
     async function boot() {
       await api('/api/visit', { method: 'POST' })
-      await Promise.all([refreshStats(), refreshFeedback(), refreshMe()])
+      const currentMe = await refreshMe()
+      await Promise.all([
+        refreshStats(),
+        currentMe.isAdmin ? refreshFeedback() : Promise.resolve(),
+      ])
     }
     boot().catch((error) => setNotice(error.message))
   }, [])
@@ -72,6 +76,7 @@ function App() {
   async function refreshMe() {
     const data = await api('/api/me')
     setMe(data)
+    return data
   }
 
   async function openAssistant(nextView) {
@@ -95,6 +100,7 @@ function App() {
   async function logout() {
     await api('/api/logout', { method: 'POST' })
     setMe({ isAdmin: false, username: null })
+    setFeedback([])
     setNotice('管理员已退出')
   }
 
@@ -185,7 +191,7 @@ function App() {
           onClose={() => setFeedbackOpen(false)}
           onSaved={() => {
             setFeedbackOpen(false)
-            refreshFeedback()
+            if (me.isAdmin) refreshFeedback().catch(() => {})
             setNotice('反馈已提交')
           }}
         />
@@ -196,7 +202,8 @@ function App() {
           onClose={() => setLoginOpen(false)}
           onLogin={async () => {
             setLoginOpen(false)
-            await refreshMe()
+            const currentMe = await refreshMe()
+            if (currentMe.isAdmin) await refreshFeedback()
             setNotice('管理员已登录')
           }}
         />
@@ -297,12 +304,14 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onRagflowOpen, on
         </div>
       </section>
 
-      <FeedbackBoard
-        items={feedback}
-        isAdmin={isAdmin}
-        onReplySaved={onReplySaved}
-        setNotice={setNotice}
-      />
+      {isAdmin && (
+        <FeedbackBoard
+          items={feedback}
+          isAdmin={isAdmin}
+          onReplySaved={onReplySaved}
+          setNotice={setNotice}
+        />
+      )}
     </>
   )
 }
