@@ -18,8 +18,7 @@
    - `QA_AUTH_CLIENT_ID` / `QA_AUTH_CLIENT_SECRET`：调用 `/api/authentication/v1/access_token` 所需的 Basic Auth 信息。
    - `QA_DEFAULT_ACCOUNT`：可选，仅用于不是从 OA 入口访问时的本地测试账号。
    - `QA_TLS_REJECT_UNAUTHORIZED=false`：仅当内网知识问答平台证书不被 Node.js 信任时用于测试。
-   - `RAGFLOW_CHAT_NAME`：制造四厂 RAGFlow 助手显示名称。
-   - `RAGFLOW_CHAT_URL`：RAGFlow 共享聊天的完整 iframe 地址，包含认证参数，只写入 `.env`，不要提交到 GitHub。
+   - `RAGFLOW_CHAT_URL`：制造四厂 RAGFlow 共享聊天的完整地址，包含认证参数，只写入 `.env`，不要提交到 GitHub。
    - `AI_MODEL_API_URL`：翻译、PDF 转 Word和标准解读共用的内网模型接口。
    - `AI_MODEL_NAME`：模型名称，当前为 `Qwen-Lite`。
    - `AI_MODEL_API_KEY`：模型接口 Bearer 密钥。
@@ -71,7 +70,7 @@ http://服务器IP:4178
 ## 新增助手
 
 - 制造一厂知识问答：继续使用 OA 身份和云盘知识问答接口，支持流式回答及原文引用。
-- 制造四厂知识问答：通过 RAGFlow 官方共享聊天 iframe 嵌入，与一厂助手在同一知识问答工作台中切换。
+- 制造四厂知识问答：点击首页入口后在浏览器新标签页或新窗口打开 RAGFlow 官方共享聊天，避免 iframe 环境造成响应变慢。
 - PDF 转 Word：逐页提取 PDF 文本；文本过少时自动将该页渲染为图片交给模型识别，最终将统一的 Markdown 源文本写入可下载的 DOCX。
 - 标准解读（一厂）：读取 DOCX 文档，依据管理员维护的提示词分段解读并生成 DOCX。
 - 标准解读（二厂）和（三厂）：与一厂使用相同处理流程，并分别使用独立提示词配置。

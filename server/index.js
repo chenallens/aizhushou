@@ -89,15 +89,27 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
 })
 
-app.get('/api/assistant-config', (_req, res) => {
+app.get('/api/assistants/ragflow/open', (_req, res) => {
   const ragflowUrl = String(process.env.RAGFLOW_CHAT_URL || '').trim()
-  res.json({
-    ragflow: {
-      enabled: Boolean(ragflowUrl),
-      name: String(process.env.RAGFLOW_CHAT_NAME || '制造四厂知识问答助手').trim(),
-      url: ragflowUrl,
-    },
-  })
+  let target
+  try {
+    target = new URL(ragflowUrl)
+  } catch {
+    target = null
+  }
+
+  if (!target || !['http:', 'https:'].includes(target.protocol)) {
+    res
+      .status(503)
+      .type('html')
+      .send('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>制造四厂知识问答助手</title><body><h2>制造四厂知识问答助手尚未配置</h2><p>请联系管理员检查服务器 .env 中的 RAGFLOW_CHAT_URL，并重启服务。</p></body></html>')
+    return
+  }
+
+  recordEvent('ragflow_click')
+  res.set('Cache-Control', 'no-store')
+  res.set('Referrer-Policy', 'no-referrer')
+  res.redirect(302, target.toString())
 })
 
 app.get('/api/me', (req, res) => {
@@ -862,7 +874,6 @@ function getStats() {
   const qaNativeUses = events.filter((event) => event.type === 'qa_click').length
   const ragflowUses = events.filter((event) => event.type === 'ragflow_click').length
   return {
-    qaUses: qaNativeUses + ragflowUses,
     qaNativeUses,
     ragflowUses,
     translationUses: events.filter((event) => event.type === 'translation_click').length,
