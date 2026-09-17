@@ -37,8 +37,7 @@ const resultsDir = path.join(storageDir, 'results')
 const dbPath = path.join(storageDir, 'aizhushou.sqlite')
 const glossaryMarkdownPath = path.join(storageDir, 'glossary.md')
 const port = Number(process.env.SERVER_PORT || 4178)
-const ragflowConnectTimeoutMs = Math.max(1_000, Number(process.env.RAGFLOW_CONNECT_TIMEOUT_MS) || 45_000)
-const ragflowTotalTimeoutMs = Math.max(5_000, Number(process.env.RAGFLOW_TOTAL_TIMEOUT_MS) || 10 * 60_000)
+const ragflowTotalTimeoutMs = Math.max(60_000, Number(process.env.RAGFLOW_TOTAL_TIMEOUT_MS) || 30 * 60_000)
 
 const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
 const defaultStandardPrompt = `你是制造企业标准解读专家。请准确理解上传标准，不改变原文事实、数值、单位和约束条件。
@@ -458,27 +457,35 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
 
   res.writeHead(200, sseHeaders())
   res.flushHeaders?.()
-  writeSse(res, { type: 'stage', stage: '正在连接 RAGFlow...' })
+  writeSse(res, { type: 'stage', stage: '问题已提交，正在等待 RAGFlow 检索...' })
 
-  const controller = new AbortController()
-  let firstByteTimer = setTimeout(() => controller.abort(new Error('连接 RAGFlow 超时')), ragflowConnectTimeoutMs)
-  let totalTimer = null
-  let upstreamConnected = false
-  const markUpstreamConnected = () => {
-    if (upstreamConnected) return
-    upstreamConnected = true
-    if (firstByteTimer) {
-      clearTimeout(firstByteTimer)
-      firstByteTimer = null
-    }
-    totalTimer = setTimeout(() => controller.abort(new Error('RAGFlow 回答超时')), ragflowTotalTimeoutMs)
-    writeSse(res, { type: 'stage', stage: 'RAGFlow 已连接，正在检索资料...' })
+  const requestId = crypto.randomUUID().slice(0, 8)
+  const trace = {
+    requestId,
+    startedAt: Date.now(),
+    phase: '等待 RAGFlow 响应头',
   }
+  logRagflowTrace(trace, 'request_started', {
+    questionChars: question.length,
+    historyMessages: history.length,
+    timeoutMs: ragflowTotalTimeoutMs,
+  })
+  const controller = new AbortController()
+  const totalTimer = setTimeout(() => {
+    logRagflowTrace(trace, 'request_timeout', { elapsedMs: Date.now() - trace.startedAt })
+    controller.abort(new Error(`RAGFlow 回答超过 ${Math.round(ragflowTotalTimeoutMs / 60_000)} 分钟，已停止`))
+  }, ragflowTotalTimeoutMs)
   const heartbeat = setInterval(() => {
     if (!res.writableEnded) res.write(': heartbeat\n\n')
   }, 15_000)
+  const waitLogger = setInterval(() => {
+    logRagflowTrace(trace, 'waiting', { elapsedMs: Date.now() - trace.startedAt })
+  }, 30_000)
   const abortForClient = () => {
-    if (!res.writableEnded) controller.abort(new Error('浏览器已断开连接'))
+    if (!res.writableEnded) {
+      logRagflowTrace(trace, 'client_disconnected', { elapsedMs: Date.now() - trace.startedAt })
+      controller.abort(new Error('浏览器已断开连接'))
+    }
   }
   req.once('aborted', abortForClient)
   res.once('close', abortForClient)
@@ -486,11 +493,9 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
   try {
     const upstream = await openRagflowCompletion({
       config,
-      question,
-      sessionId: requestedSessionId,
       messages: history,
       signal: controller.signal,
-      onConnected: markUpstreamConnected,
+      trace,
     })
 
     if (!upstream.response.ok) {
@@ -498,21 +503,31 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
       throw new Error(extractRagflowError(data) || `RAGFlow 接口调用失败，状态码 ${upstream.response.status}`)
     }
 
-    if (upstream.sessionId) writeSse(res, { type: 'session', sessionId: upstream.sessionId })
-    writeSse(res, { type: 'stage', stage: '正在检索制造四厂知识库...' })
-    await streamRagflowResponse(upstream.response, res, upstream.sessionId, upstream.mode)
+    writeSse(res, { type: 'stage', stage: 'RAGFlow 已响应，正在生成回答...' })
+    const finalState = await streamRagflowResponse(upstream.response, res, '', 'openai', trace)
+    logRagflowTrace(trace, 'request_completed', {
+      elapsedMs: Date.now() - trace.startedAt,
+      answerChars: finalState.answer.length,
+      references: finalState.references.length,
+    })
   } catch (error) {
+    logRagflowTrace(trace, 'request_failed', {
+      elapsedMs: Date.now() - trace.startedAt,
+      errorName: error.name || 'Error',
+      error: error.message || 'unknown error',
+      causeCode: error.cause?.code || null,
+      causeName: error.cause?.name || null,
+      cause: error.cause?.message || null,
+    })
     if (!res.writableEnded) {
-      const message = error.name === 'AbortError'
-        ? 'RAGFlow 请求已停止或超时'
-        : error.message || '制造四厂知识问答助手调用失败'
+      const message = error.message || '制造四厂知识问答助手调用失败'
       writeSse(res, { type: 'error', error: message })
       res.end()
     }
   } finally {
-    if (firstByteTimer) clearTimeout(firstByteTimer)
-    if (totalTimer) clearTimeout(totalTimer)
+    clearTimeout(totalTimer)
     clearInterval(heartbeat)
+    clearInterval(waitLogger)
     req.off('aborted', abortForClient)
     res.off('close', abortForClient)
   }
@@ -1241,147 +1256,30 @@ function ragflowHeaders(config) {
   }
 }
 
-async function openRagflowCompletion({ config, question, sessionId, messages, signal, onConnected }) {
-  const openAiPaths = [
-    { path: `/api/v1/chats_openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: false },
-    { path: `/api/v1/openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: true },
-  ]
-  for (const candidate of openAiPaths) {
-    const openAiRequest = {
-      model: 'model',
-      messages,
-      stream: true,
-    }
-    if (candidate.includeReferences) openAiRequest.extra_body = { reference: true }
-    const compatibleResponse = await fetch(`${config.baseUrl}${candidate.path}`, {
-      method: 'POST',
-      headers: ragflowHeaders(config),
-      body: JSON.stringify(openAiRequest),
-      signal,
-    })
-    onConnected?.()
-    logRagflowAttempt(candidate.path, compatibleResponse.status)
-    if ([404, 405].includes(compatibleResponse.status)) {
-      await compatibleResponse.body?.cancel()
-      continue
-    }
-    const inspected = await inspectRagflowResponse(compatibleResponse)
-    if (inspected.businessNotFound) {
-      console.info(`[RAGFlow] ${candidate.path} -> business NotFound, trying next endpoint`)
-      await inspected.response.body?.cancel()
-      continue
-    }
-    return { response: inspected.response, sessionId: '', mode: 'openai' }
-  }
-
-  const requestBody = {
-    chat_id: config.chatId,
-    question,
-    stream: true,
-    legacy: false,
-  }
-  if (sessionId) requestBody.session_id = sessionId
-  const nativePath = '/api/v1/chat/completions'
-  const nativeResponse = await fetch(`${config.baseUrl}${nativePath}`, {
-    method: 'POST',
-    headers: ragflowHeaders(config),
-    body: JSON.stringify(requestBody),
-    signal,
+async function openRagflowCompletion({ config, messages, signal, trace }) {
+  const apiPath = `/api/v1/chats_openai/${encodeURIComponent(config.chatId)}/chat/completions`
+  trace.phase = '等待 RAGFlow 响应头'
+  logRagflowTrace(trace, 'upstream_request', {
+    endpoint: 'chats_openai',
+    messages: messages.length,
   })
-  onConnected?.()
-  logRagflowAttempt(nativePath, nativeResponse.status)
-  if (![404, 405].includes(nativeResponse.status)) {
-    const inspected = await inspectRagflowResponse(nativeResponse)
-    if (!inspected.businessNotFound) {
-      return { response: inspected.response, sessionId, mode: 'native' }
-    }
-    console.info(`[RAGFlow] ${nativePath} -> business NotFound, trying next endpoint`)
-    await inspected.response.body?.cancel()
-  } else {
-    await nativeResponse.body?.cancel()
-  }
-
-  const compatibleSessionId = sessionId || await createRagflowSession(config, signal)
-  const legacyPath = `/api/v1/chats/${encodeURIComponent(config.chatId)}/completions`
-  const compatibleResponse = await fetch(`${config.baseUrl}${legacyPath}`, {
-    method: 'POST',
-    headers: ragflowHeaders(config),
-    body: JSON.stringify({
-      question,
-      stream: true,
-      session_id: compatibleSessionId,
-    }),
-    signal,
-  })
-  onConnected?.()
-  logRagflowAttempt(legacyPath, compatibleResponse.status)
-  return { response: compatibleResponse, sessionId: compatibleSessionId, mode: 'native' }
-}
-
-async function inspectRagflowResponse(response) {
-  const contentType = response.headers.get('content-type') || ''
-  if (contentType.includes('application/json')) {
-    const data = await safeJson(response)
-    const body = JSON.stringify(data || {})
-    const headers = new Headers(response.headers)
-    headers.delete('content-length')
-    return {
-      response: new Response(body, { status: response.status, statusText: response.statusText, headers }),
-      businessNotFound: isRagflowBusinessNotFound(data),
-    }
-  }
-  if (!response.body || !contentType.includes('text/event-stream')) {
-    return { response, businessNotFound: false }
-  }
-
-  const [probeBody, forwardBody] = response.body.tee()
-  const forwardedResponse = new Response(forwardBody, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  })
-  const reader = probeBody.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let businessNotFound = false
-  try {
-    while (buffer.length < 256 * 1024) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const parsed = consumeSseBlocks(buffer)
-      if (parsed.events.length) {
-        businessNotFound = isRagflowBusinessNotFound(parsed.events[0])
-        break
-      }
-    }
-  } finally {
-    reader.cancel().catch(() => {})
-  }
-  return { response: forwardedResponse, businessNotFound }
-}
-
-function isRagflowBusinessNotFound(data) {
-  const code = Number(data?.code)
-  const message = extractRagflowError(data)
-  return code === 404 || /notfound|404\s*:\s*not found/i.test(message)
-}
-
-async function createRagflowSession(config, signal) {
-  const apiPath = `/api/v1/chats/${encodeURIComponent(config.chatId)}/sessions`
   const response = await fetch(`${config.baseUrl}${apiPath}`, {
     method: 'POST',
     headers: ragflowHeaders(config),
-    body: JSON.stringify({ name: `AI助手服务台 ${new Date().toLocaleString('zh-CN')}` }),
+    body: JSON.stringify({
+      model: 'model',
+      messages,
+      stream: true,
+    }),
     signal,
   })
-  logRagflowAttempt(apiPath, response.status)
-  const data = await safeJson(response)
-  const sessionId = normalizeRagflowSessionId(data?.data?.id || data?.data?.session_id)
-  if (!response.ok || data?.code !== 0 || !sessionId) {
-    throw new Error(extractRagflowError(data) || 'RAGFlow 无法创建新会话')
-  }
-  return sessionId
+  trace.phase = '已收到响应头，等待 SSE 数据'
+  logRagflowTrace(trace, 'response_headers', {
+    elapsedMs: Date.now() - trace.startedAt,
+    status: response.status,
+    contentType: response.headers.get('content-type') || '',
+  })
+  return { response }
 }
 
 function normalizeRagflowHistory(value, question) {
@@ -1404,13 +1302,23 @@ function normalizeRagflowHistory(value, question) {
   return messages
 }
 
-function logRagflowAttempt(apiPath, status) {
-  console.info(`[RAGFlow] ${apiPath} -> HTTP ${status}`)
+function logRagflowTrace(trace, event, details = {}) {
+  console.info(`[RAGFlow:${trace.requestId}] ${event} ${JSON.stringify({
+    phase: trace.phase,
+    ...details,
+  })}`)
 }
 
-async function streamRagflowResponse(response, res, initialSessionId = '', mode = 'native') {
+async function streamRagflowResponse(response, res, initialSessionId = '', mode = 'native', trace = null) {
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) {
+    if (trace) {
+      trace.phase = '处理 JSON 响应'
+      logRagflowTrace(trace, 'first_response_event', {
+        elapsedMs: Date.now() - trace.startedAt,
+        format: 'json',
+      })
+    }
     const event = await safeJson(response)
     const result = consumeRagflowEvent(event, {
       answer: '',
@@ -1420,7 +1328,7 @@ async function streamRagflowResponse(response, res, initialSessionId = '', mode 
     }, res, mode)
     if (result.error) throw new Error(result.error)
     finishRagflowStream(res, result.state)
-    return
+    return result.state
   }
 
   const decoder = new TextDecoder()
@@ -1431,26 +1339,57 @@ async function streamRagflowResponse(response, res, initialSessionId = '', mode 
     sessionId: initialSessionId,
     thinking: false,
   }
+  let firstEventLogged = false
+  let firstAnswerLogged = false
+
+  const consumeEvent = (event) => {
+    if (trace && !firstEventLogged) {
+      firstEventLogged = true
+      trace.phase = '已收到首个 SSE 事件'
+      logRagflowTrace(trace, 'first_sse_event', {
+        elapsedMs: Date.now() - trace.startedAt,
+        code: event?.code ?? null,
+        hasChoices: Array.isArray(event?.choices),
+      })
+    }
+    const answerLengthBefore = state.answer.length
+    const result = consumeRagflowEvent(event, state, res, mode)
+    if (result.error) throw new Error(result.error)
+    state = result.state
+    if (trace && !firstAnswerLogged && state.answer.length > answerLengthBefore) {
+      firstAnswerLogged = true
+      trace.phase = '正在接收回答正文'
+      logRagflowTrace(trace, 'first_answer_chunk', {
+        elapsedMs: Date.now() - trace.startedAt,
+        answerChars: state.answer.length,
+      })
+    }
+  }
 
   for await (const chunk of response.body) {
     buffer += decoder.decode(chunk, { stream: true })
     const parsed = consumeSseBlocks(buffer)
     buffer = parsed.remainder
     for (const event of parsed.events) {
-      const result = consumeRagflowEvent(event, state, res, mode)
-      if (result.error) throw new Error(result.error)
-      state = result.state
+      consumeEvent(event)
     }
   }
 
   buffer += decoder.decode()
   const parsed = consumeSseBlocks(`${buffer}\n\n`)
   for (const event of parsed.events) {
-    const result = consumeRagflowEvent(event, state, res, mode)
-    if (result.error) throw new Error(result.error)
-    state = result.state
+    consumeEvent(event)
+  }
+  if (trace) {
+    trace.phase = '上游流已结束'
+    logRagflowTrace(trace, 'upstream_stream_ended', {
+      elapsedMs: Date.now() - trace.startedAt,
+      answerChars: state.answer.length,
+      references: state.references.length,
+    })
   }
   finishRagflowStream(res, state)
+  return state
 }
 
 function consumeSseBlocks(value) {
