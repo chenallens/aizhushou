@@ -8,11 +8,11 @@
 - 项目目录：`E:\Qwen-cc\aizhushou`
 - GitHub 仓库：<https://github.com/chenallens/aizhushou>
 - 当前分支：`main`
-- 当前功能基线（不含本文档提交）：`2f482a1`
+- 当前功能基线（不含本文档提交）：`4653a42`
 - 最后更新时间：2026-09-17
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.66`
 - 当前访问地址：`http://172.28.200.66/`
-- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，并增加旧版 RAGFlow `chats_openai` 自动兼容，支持连续会话、停止生成、新会话、思考过滤和引用资料；一厂与四厂统计保持独立。2026-09-17 v2 修复发布包已生成，服务器 `172.28.200.66` 等待升级。
+- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，并兼容 HTTP 200 响应流内返回业务 404 的旧版 RAGFlow；支持连续会话、停止生成、新会话、思考过滤和引用资料。2026-09-17 v3 修复发布包已生成，服务器 `172.28.200.66` 等待升级。
 
 ## 2. 项目目标
 
@@ -134,7 +134,7 @@ ${QA_API_BASE_URL}/api/intelli-search/v2/bots/${QA_BOT_ID}/chat
 
 - 首页名称为“制造四厂知识问答助手”，与制造一厂入口并列。
 - 点击首页四厂卡片后进入服务台内的原生聊天页面，不再依赖共享页面或 iframe 进行主要问答。
-- 后端依次尝试新版原生接口、新版 OpenAI 兼容接口、旧版 `chats_openai` 接口和旧会话接口，将命中的 SSE 分片立即转发给浏览器；各接口 HTTP 状态会写入 Node 日志，便于定位版本差异。
+- 后端依次尝试旧版 `chats_openai`、新版 OpenAI 兼容、新版原生和旧会话接口，将命中的 SSE 分片立即转发给浏览器；接口探测不仅检查 HTTP 状态，还读取首个 SSE 业务事件，HTTP 200 内包含 `NotFound 404` 时也会继续回退。
 - 新版原生接口通过 `session_id` 延续会话；旧版 OpenAI 兼容接口由浏览器发送最近对话历史，以保持连续追问。
 - 页面提供停止生成、新会话和“在 RAGFlow 中打开”备用入口；新会话会清空当前 `session_id`。
 - 后端过滤 `start_to_think`、`end_to_think` 和 `<think>` 思考内容，只向页面发送正式回答，并整理 `reference.chunks` 为参考资料卡片。
@@ -437,13 +437,13 @@ npm run build
 ### 14.1 当前发布包
 
 - Nginx 目录：`E:\Qwen-cc\nginx-1.23.2`
-- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v2.zip`
-- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917.zip`（存在旧版 RAGFlow 404，不建议部署）
+- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`
+- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v2.zip`（不能处理 HTTP 200 内的业务 404，不建议部署）
 - 发布包内置 Node.js：`v20.19.5`
 - 发布包说明：`AI_ASSISTANT_DEPLOYMENT.txt`
-- 最新包功能提交：`2f482a1`
-- 最新包大小：`103.27 MB`（`108290756` 字节）
-- 最新包 SHA-256：`899176497D9CEEB22BAF4899F64457A1FBDDC9B9713911D1FC863B7EB3E80DD2`
+- 最新包功能提交：`4653a42`
+- 最新包大小：`103.28 MB`（`108291775` 字节）
+- 最新包 SHA-256：`3B9EAF96B5EB7AEAA576941EFFCA291D6CFF641F791DFEEB420AFB415A3926E6`
 
 发布结构概要：
 
@@ -552,6 +552,7 @@ app/aizhushou/storage/
 | `67ca54d` | 四厂助手改为新窗口打开，并拆分一厂、四厂问答使用统计 |
 | `d801b4a` | 四厂助手重写为平台内原生 RAGFlow 流式聊天 |
 | `2f482a1` | 增加旧版 RAGFlow OpenAI 兼容接口自动回退 |
+| `4653a42` | 支持 HTTP 200 响应流内业务 404 自动回退 |
 
 ## 17. 已知限制与待关注事项
 
@@ -675,6 +676,16 @@ app/aizhushou/storage/
 - 验证：构建和代码检查通过；旧版协议仿真中前两个接口返回 404，程序自动命中 `/api/v1/chats_openai/{chat_id}/chat/completions` 并流式回答；第二次追问成功携带两条用户消息。
 - Git 提交：`2f482a1`。
 - 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v2.zip`，大小 `103.27 MB`，SHA-256 为 `899176497D9CEEB22BAF4899F64457A1FBDDC9B9713911D1FC863B7EB3E80DD2`；已核对旧版回退代码、接口状态日志、当前前端构建和随包环境配置，并使用发布目录内置 Node 验证两次 404 后命中旧版接口并流式回答。旧的无后缀版本不再建议部署。
+
+### 2026-09-17 - 修复 HTTP 200 内的业务 NotFound
+
+- 现象：v2 日志显示 `/api/v1/chat/completions -> HTTP 200`，页面仍收到 `<NotFound '404: Not Found'>`。
+- 原因：该 RAGFlow 版本把路由或业务 404 包装在 HTTP 200 的 SSE 数据中，v2 只依据 HTTP 状态码判断是否回退。
+- 实现：将旧版 `chats_openai` 调整为首选；通过双路流读取首个 SSE 事件，发现业务 NotFound 后不中断浏览器连接，自动尝试下一兼容接口。
+- 数据或配置影响：数据库和 `.env` 不变。
+- 验证：旧版首选接口直接流式成功；模拟旧版接口返回 HTTP 200 + NotFound 时，日志记录业务回退，随后新版 OpenAI 兼容接口流式成功；`npm run lint`、`npm run build` 和 `git diff --check` 通过。
+- Git 提交：`4653a42`。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`，大小 `103.28 MB`，SHA-256 为 `3B9EAF96B5EB7AEAA576941EFFCA291D6CFF641F791DFEEB420AFB415A3926E6`；已确认包内旧版接口优先顺序、首事件业务错误探测和自动回退代码。v2 不再建议部署。
 
 ### 后续记录模板
 
