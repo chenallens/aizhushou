@@ -27,6 +27,7 @@ import {
   Send,
   Settings2,
   ShieldCheck,
+  Square,
   Trash2,
   X,
 } from 'lucide-react'
@@ -87,14 +88,11 @@ function App() {
       standard1: 'standard',
       standard2: 'standard',
       standard3: 'standard',
+      ragflow: 'ragflow',
     }[nextView]
     if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST' })
     setView(nextView)
     refreshStats().catch(() => {})
-  }
-
-  function handleRagflowOpen() {
-    window.setTimeout(() => refreshStats().catch(() => {}), 800)
   }
 
   async function logout() {
@@ -128,7 +126,7 @@ function App() {
           <button className={view === 'translate' ? 'active' : ''} type="button" onClick={() => openAssistant('translate')}>
             <Languages size={17} /> 翻译
           </button>
-          <button className={view === 'qa' ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
+          <button className={['qa', 'ragflow'].includes(view) ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
             <Bot size={17} /> 问答
           </button>
         </nav>
@@ -167,12 +165,12 @@ function App() {
           feedback={feedback}
           isAdmin={me.isAdmin}
           onOpenAssistant={openAssistant}
-          onRagflowOpen={handleRagflowOpen}
           onReplySaved={refreshFeedback}
           setNotice={setNotice}
         />
       )}
       {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
+      {view === 'ragflow' && <RagflowQaView setNotice={setNotice} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
       {view === 'pdf' && <PdfToWordView setNotice={setNotice} />}
       {view === 'standard1' && <StandardView plant={1} setNotice={setNotice} />}
@@ -212,7 +210,7 @@ function App() {
   )
 }
 
-function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onRagflowOpen, onReplySaved, setNotice }) {
+function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
   return (
     <>
       <AccordionSection eyebrow="Standard Interpretation" title="标准解读助手">
@@ -274,21 +272,17 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onRagflowOpen, on
               <small>知识来源为云盘内相关文档。</small>
             </span>
           </button>
-          <a
+          <button
             className="assistantCard ragflow"
-            href="/api/assistants/ragflow/open"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="在新窗口打开制造四厂知识问答助手"
-            onClick={onRagflowOpen}
+            type="button"
+            onClick={() => onOpenAssistant('ragflow')}
           >
             <span className="assistantIcon"><Database size={26} /></span>
             <span>
               <strong>制造四厂知识问答助手</strong>
               <small>知识来源为制造四厂 RAGFlow 知识库。</small>
             </span>
-            <ExternalLink className="assistantExternalIcon" size={18} aria-hidden="true" />
-          </a>
+          </button>
         </div>
       </AccordionSection>
 
@@ -518,6 +512,181 @@ function QaView({ setNotice, oaCode }) {
         <button className="primary" type="submit" disabled={loading}>
           <Send size={18} /> 发送
         </button>
+      </form>
+    </section>
+  )
+}
+
+function RagflowQaView({ setNotice }) {
+  const [messages, setMessages] = useState([
+    { role: 'assistant', content: '你好，我是制造四厂知识问答助手。' },
+  ])
+  const [input, setInput] = useState('')
+  const [sessionId, setSessionId] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [stage, setStage] = useState('')
+  const chatRailRef = useRef(null)
+  const requestControllerRef = useRef(null)
+
+  useEffect(() => {
+    const rail = chatRailRef.current
+    if (rail) rail.scrollTo({ top: rail.scrollHeight, behavior: 'smooth' })
+  }, [messages, stage])
+
+  useEffect(() => () => requestControllerRef.current?.abort(), [])
+
+  function startNewConversation() {
+    requestControllerRef.current?.abort()
+    setMessages([{ role: 'assistant', content: '已开始新会话。请告诉我你想查询的内容。' }])
+    setSessionId('')
+    setLoading(false)
+    setStage('')
+  }
+
+  function stopGenerating() {
+    requestControllerRef.current?.abort()
+    requestControllerRef.current = null
+    setLoading(false)
+    setStage('已停止生成')
+  }
+
+  async function sendMessage(event) {
+    event.preventDefault()
+    const text = input.trim()
+    if (!text || loading) return
+
+    const assistantIndex = messages.length + 1
+    setMessages((current) => [
+      ...current,
+      { role: 'user', content: text },
+      { role: 'assistant', content: '', references: [], streaming: true },
+    ])
+    setInput('')
+    setLoading(true)
+    setStage('正在连接 RAGFlow...')
+
+    const controller = new AbortController()
+    requestControllerRef.current = controller
+
+    try {
+      const response = await fetch('/api/ragflow/chat/stream', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: text, sessionId }),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        const errorText = await response.text()
+        let errorData = {}
+        try {
+          errorData = errorText ? JSON.parse(errorText) : {}
+        } catch {
+          errorData = {}
+        }
+        throw new Error(errorData.error || '制造四厂知识问答助手调用失败')
+      }
+
+      await readQaStream(response, (eventData) => {
+        if (eventData.type === 'stage') setStage(eventData.stage || '')
+        if (eventData.type === 'session' && eventData.sessionId) setSessionId(eventData.sessionId)
+        if (eventData.type === 'answer') {
+          setStage('正在生成回答...')
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || '',
+            streaming: true,
+          }))
+        }
+        if (eventData.type === 'done') {
+          if (eventData.sessionId) setSessionId(eventData.sessionId)
+          setMessages((current) => updateMessageAt(current, assistantIndex, {
+            content: eventData.answer || current[assistantIndex]?.content || '未返回内容',
+            references: eventData.references || [],
+            streaming: false,
+          }))
+          setStage('')
+        }
+        if (eventData.type === 'error') {
+          throw new Error(eventData.error || '制造四厂知识问答助手流式调用失败')
+        }
+      })
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setMessages((current) => updateMessageAt(current, assistantIndex, {
+          content: current[assistantIndex]?.content || '回答已停止。',
+          streaming: false,
+        }))
+      } else {
+        setNotice(error.message)
+        setMessages((current) => updateMessageAt(current, assistantIndex, {
+          content: `调用失败：${error.message}`,
+          references: [],
+          streaming: false,
+        }))
+      }
+    } finally {
+      if (requestControllerRef.current === controller) requestControllerRef.current = null
+      setLoading(false)
+      setStage('')
+    }
+  }
+
+  return (
+    <section className="workspace qaWorkspace ragflowWorkspace">
+      <div className="qaToolbar">
+        <div>
+          <span className="eyebrow">RAGFlow Knowledge Service</span>
+          <h2>制造四厂知识问答助手</h2>
+          <p>知识来源为制造四厂 RAGFlow 知识库</p>
+        </div>
+        <div className="qaToolbarActions">
+          <button className="ghost" type="button" onClick={startNewConversation} disabled={loading} title="开始新会话">
+            <RefreshCw size={17} /> 新会话
+          </button>
+          <a className="ghost buttonLink" href="/api/assistants/ragflow/open?count=0" target="_blank" rel="noopener noreferrer">
+            <ExternalLink size={17} /> 在 RAGFlow 中打开
+          </a>
+        </div>
+      </div>
+
+      <div className="chatRail" ref={chatRailRef}>
+        {messages.map((message, index) => (
+          <div className={`chatMessage ${message.role}`} key={`${message.role}-${index}`}>
+            <span>{message.role === 'user' ? '用户' : '助手'}</span>
+            <p className="chatText">
+              {message.content || (message.streaming ? stage || '正在检索资料...' : '')}
+              {message.streaming && <i className="streamCursor" />}
+            </p>
+            {message.role === 'assistant' && message.references?.length > 0 && (
+              <div className="qaCites">
+                <strong><Quote size={15} /> 参考资料</strong>
+                <div className="qaCiteGrid">
+                  {message.references.map((reference) => (
+                    <article className="qaCiteCard ragflowReference" key={reference.id}>
+                      <FileText size={17} />
+                      <span>{reference.documentName}</span>
+                      {reference.similarity != null && <small>相关度 {Math.round(reference.similarity * 100)}%</small>}
+                      {reference.snippet && <em>{reference.snippet}</em>}
+                    </article>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <form className="chatComposer" onSubmit={sendMessage}>
+        <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入要咨询的问题" disabled={loading} />
+        {loading ? (
+          <button className="ghost" type="button" onClick={stopGenerating}>
+            <Square size={17} /> 停止
+          </button>
+        ) : (
+          <button className="primary" type="submit" disabled={!input.trim()}>
+            <Send size={18} /> 发送
+          </button>
+        )}
       </form>
     </section>
   )

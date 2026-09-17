@@ -287,13 +287,6 @@ h2 {
   transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
-.assistantExternalIcon {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  color: #a44912;
-}
-
 .assistantCard.pending {
   opacity: 0.72;
 }
@@ -503,6 +496,49 @@ h2 {
   gap: 14px;
 }
 
+.ragflowWorkspace {
+  grid-template-rows: auto minmax(420px, 58vh) auto;
+}
+
+.qaToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.qaToolbar h2 {
+  margin: 3px 0 4px;
+  font-size: 22px;
+}
+
+.qaToolbar p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.qaToolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.buttonLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
 .chatRail {
   display: flex;
   flex-direction: column;
@@ -627,6 +663,10 @@ h2 {
   font-style: normal;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+.ragflowReference {
+  cursor: default;
 }
 
 .chatComposer {
@@ -1540,6 +1580,17 @@ h2 {
   .chatComposer {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .qaToolbar,
+  .qaToolbarActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qaToolbarActions .ghost,
+  .qaToolbarActions .buttonLink {
+    width: 100%;
   }
 
   .auditItem {

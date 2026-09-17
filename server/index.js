@@ -89,7 +89,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
 })
 
-app.get('/api/assistants/ragflow/open', (_req, res) => {
+app.get('/api/assistants/ragflow/open', (req, res) => {
   const ragflowUrl = String(process.env.RAGFLOW_CHAT_URL || '').trim()
   let target
   try {
@@ -106,7 +106,7 @@ app.get('/api/assistants/ragflow/open', (_req, res) => {
     return
   }
 
-  recordEvent('ragflow_click')
+  if (req.query.count !== '0') recordEvent('ragflow_click')
   res.set('Cache-Control', 'no-store')
   res.set('Referrer-Policy', 'no-referrer')
   res.redirect(302, target.toString())
@@ -415,6 +415,93 @@ app.post('/api/qa/chat/stream', async (req, res, next) => {
       return
     }
     next(error)
+  }
+})
+
+app.post('/api/ragflow/chat/stream', async (req, res) => {
+  const question = String(req.body?.question || '').trim()
+  const requestedSessionId = normalizeRagflowSessionId(req.body?.sessionId)
+  if (!question) {
+    res.status(400).json({ error: '请输入问题' })
+    return
+  }
+  if (question.length > 30000) {
+    res.status(400).json({ error: '单次提问不能超过 30000 字，请拆分后发送' })
+    return
+  }
+
+  if (isMockMode()) {
+    res.writeHead(200, sseHeaders())
+    const mockSessionId = requestedSessionId || crypto.randomUUID().replaceAll('-', '')
+    writeSse(res, { type: 'session', sessionId: mockSessionId })
+    writeSse(res, { type: 'stage', stage: '正在检索制造四厂知识库...' })
+    const answer = `模拟回答：已收到“${question}”。部署到内网并配置 RAGFLOW_API_KEY 后将调用制造四厂 RAGFlow 聊天助理。`
+    for (const chunk of splitAnswerForMock(answer)) {
+      writeSse(res, { type: 'answer', answer: chunk })
+      await delay(70)
+    }
+    writeSse(res, { type: 'done', answer, references: [], sessionId: mockSessionId })
+    res.end()
+    return
+  }
+
+  let config
+  try {
+    config = getRagflowConfig()
+  } catch (error) {
+    res.status(503).json({ error: error.message })
+    return
+  }
+
+  res.writeHead(200, sseHeaders())
+  res.flushHeaders?.()
+  writeSse(res, { type: 'stage', stage: '正在连接 RAGFlow...' })
+
+  const controller = new AbortController()
+  let firstByteTimer = setTimeout(() => controller.abort(new Error('连接 RAGFlow 超时')), 45_000)
+  let totalTimer = null
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': heartbeat\n\n')
+  }, 15_000)
+  const abortForClient = () => {
+    if (!res.writableEnded) controller.abort(new Error('浏览器已断开连接'))
+  }
+  req.once('aborted', abortForClient)
+  res.once('close', abortForClient)
+
+  try {
+    const upstream = await openRagflowCompletion({
+      config,
+      question,
+      sessionId: requestedSessionId,
+      signal: controller.signal,
+    })
+    clearTimeout(firstByteTimer)
+    firstByteTimer = null
+    totalTimer = setTimeout(() => controller.abort(new Error('RAGFlow 回答超时')), 10 * 60_000)
+
+    if (!upstream.response.ok) {
+      const data = await safeJson(upstream.response)
+      throw new Error(extractRagflowError(data) || `RAGFlow 接口调用失败，状态码 ${upstream.response.status}`)
+    }
+
+    if (upstream.sessionId) writeSse(res, { type: 'session', sessionId: upstream.sessionId })
+    writeSse(res, { type: 'stage', stage: '正在检索制造四厂知识库...' })
+    await streamRagflowResponse(upstream.response, res, upstream.sessionId)
+  } catch (error) {
+    if (!res.writableEnded) {
+      const message = error.name === 'AbortError'
+        ? 'RAGFlow 请求已停止或超时'
+        : error.message || '制造四厂知识问答助手调用失败'
+      writeSse(res, { type: 'error', error: message })
+      res.end()
+    }
+  } finally {
+    if (firstByteTimer) clearTimeout(firstByteTimer)
+    if (totalTimer) clearTimeout(totalTimer)
+    clearInterval(heartbeat)
+    req.off('aborted', abortForClient)
+    res.off('close', abortForClient)
   }
 })
 
@@ -1117,6 +1204,238 @@ function splitAnswerForMock(answer) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function getRagflowConfig() {
+  const baseUrl = normalizeBaseUrl(process.env.RAGFLOW_API_BASE_URL)
+  const apiKey = String(process.env.RAGFLOW_API_KEY || '').trim()
+  const chatId = String(process.env.RAGFLOW_CHAT_ID || '').trim()
+  if (!baseUrl || !apiKey || !chatId) {
+    throw new Error('请在 .env 中配置 RAGFLOW_API_BASE_URL、RAGFLOW_API_KEY 和 RAGFLOW_CHAT_ID')
+  }
+  return { baseUrl, apiKey, chatId }
+}
+
+function normalizeRagflowSessionId(value) {
+  const sessionId = String(value || '').trim()
+  return /^[A-Za-z0-9_-]{8,128}$/.test(sessionId) ? sessionId : ''
+}
+
+function ragflowHeaders(config) {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.apiKey}`,
+  }
+}
+
+async function openRagflowCompletion({ config, question, sessionId, signal }) {
+  const requestBody = {
+    chat_id: config.chatId,
+    question,
+    stream: true,
+    legacy: false,
+  }
+  if (sessionId) requestBody.session_id = sessionId
+
+  const response = await fetch(`${config.baseUrl}/api/v1/chat/completions`, {
+    method: 'POST',
+    headers: ragflowHeaders(config),
+    body: JSON.stringify(requestBody),
+    signal,
+  })
+  if (![404, 405].includes(response.status)) {
+    return { response, sessionId }
+  }
+
+  await response.body?.cancel()
+  const compatibleSessionId = sessionId || await createRagflowSession(config, signal)
+  const compatibleResponse = await fetch(`${config.baseUrl}/api/v1/chats/${encodeURIComponent(config.chatId)}/completions`, {
+    method: 'POST',
+    headers: ragflowHeaders(config),
+    body: JSON.stringify({
+      question,
+      stream: true,
+      session_id: compatibleSessionId,
+    }),
+    signal,
+  })
+  return { response: compatibleResponse, sessionId: compatibleSessionId }
+}
+
+async function createRagflowSession(config, signal) {
+  const response = await fetch(`${config.baseUrl}/api/v1/chats/${encodeURIComponent(config.chatId)}/sessions`, {
+    method: 'POST',
+    headers: ragflowHeaders(config),
+    body: JSON.stringify({ name: `AI助手服务台 ${new Date().toLocaleString('zh-CN')}` }),
+    signal,
+  })
+  const data = await safeJson(response)
+  const sessionId = normalizeRagflowSessionId(data?.data?.id || data?.data?.session_id)
+  if (!response.ok || data?.code !== 0 || !sessionId) {
+    throw new Error(extractRagflowError(data) || 'RAGFlow 无法创建新会话')
+  }
+  return sessionId
+}
+
+async function streamRagflowResponse(response, res, initialSessionId = '') {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const event = await safeJson(response)
+    const result = consumeRagflowEvent(event, {
+      answer: '',
+      references: [],
+      sessionId: initialSessionId,
+      thinking: false,
+    }, res)
+    if (result.error) throw new Error(result.error)
+    finishRagflowStream(res, result.state)
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let state = {
+    answer: '',
+    references: [],
+    sessionId: initialSessionId,
+    thinking: false,
+  }
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true })
+    const parsed = consumeSseBlocks(buffer)
+    buffer = parsed.remainder
+    for (const event of parsed.events) {
+      const result = consumeRagflowEvent(event, state, res)
+      if (result.error) throw new Error(result.error)
+      state = result.state
+    }
+  }
+
+  buffer += decoder.decode()
+  const parsed = consumeSseBlocks(`${buffer}\n\n`)
+  for (const event of parsed.events) {
+    const result = consumeRagflowEvent(event, state, res)
+    if (result.error) throw new Error(result.error)
+    state = result.state
+  }
+  finishRagflowStream(res, state)
+}
+
+function consumeSseBlocks(value) {
+  const normalized = String(value || '').replace(/\r\n/g, '\n')
+  const blocks = normalized.split('\n\n')
+  const remainder = blocks.pop() || ''
+  const events = []
+  for (const block of blocks) {
+    const payload = block
+      .split('\n')
+      .filter((line) => line.trimStart().startsWith('data:'))
+      .map((line) => line.slice(line.indexOf(':') + 1).trimStart())
+      .join('\n')
+      .trim()
+    if (!payload || payload === '[DONE]') continue
+    try {
+      events.push(JSON.parse(payload))
+    } catch {
+      continue
+    }
+  }
+  return { events, remainder }
+}
+
+function consumeRagflowEvent(event, previousState, res) {
+  const state = { ...previousState }
+  if (!event || typeof event !== 'object') return { state }
+  if (Number(event.code || 0) !== 0) {
+    return { state, error: extractRagflowError(event) || 'RAGFlow 返回业务错误' }
+  }
+  if (event.data === true || event.data == null) return { state }
+
+  const data = event.data
+  if (typeof data !== 'object') return { state }
+
+  const sessionId = normalizeRagflowSessionId(data.session_id)
+  if (sessionId && sessionId !== state.sessionId) {
+    state.sessionId = sessionId
+    writeSse(res, { type: 'session', sessionId })
+  }
+
+  const references = normalizeRagflowReferences(data.reference)
+  if (references.length) state.references = references
+
+  if (data.start_to_think === true) {
+    state.thinking = true
+    writeSse(res, { type: 'stage', stage: '正在分析检索结果...' })
+  }
+  if (data.end_to_think === true) {
+    state.thinking = false
+    writeSse(res, { type: 'stage', stage: '正在生成回答...' })
+  }
+
+  const fragment = String(data.answer || '')
+  if (fragment && !state.thinking) {
+    const visibleFragment = stripRagflowThinking(fragment)
+    if (visibleFragment) {
+      state.answer = mergeRagflowAnswer(state.answer, visibleFragment)
+      writeSse(res, { type: 'answer', answer: cleanRagflowAnswer(state.answer) })
+    }
+  }
+  return { state }
+}
+
+function finishRagflowStream(res, state) {
+  const answer = cleanRagflowAnswer(state.answer) || '未返回内容'
+  writeSse(res, {
+    type: 'done',
+    answer,
+    references: state.references,
+    sessionId: state.sessionId,
+  })
+  res.end()
+}
+
+function stripRagflowThinking(value) {
+  return String(value || '')
+    .replace(/<think[\s\S]*?<\/think>/gi, '')
+    .replace(/<think[\s\S]*$/gi, '')
+    .replace(/<\/?think>/gi, '')
+}
+
+function mergeRagflowAnswer(current, incoming) {
+  if (!current) return incoming
+  if (!incoming) return current
+  if (incoming.startsWith(current)) return incoming
+  if (current.endsWith(incoming)) return current
+  return `${current}${incoming}`
+}
+
+function cleanRagflowAnswer(value) {
+  return cleanQaAnswer(value)
+}
+
+function normalizeRagflowReferences(reference) {
+  const chunks = Array.isArray(reference?.chunks) ? reference.chunks : []
+  const seen = new Set()
+  return chunks.flatMap((chunk, index) => {
+    if (!chunk || typeof chunk !== 'object') return []
+    const snippet = cleanQaAnswer(chunk.content || chunk.content_with_weight || '').slice(0, 360)
+    const documentName = String(chunk.document_name || chunk.doc_name || chunk.document_keyword || `参考资料 ${index + 1}`).trim()
+    const identity = String(chunk.id || chunk.chunk_id || `${chunk.document_id || documentName}:${snippet.slice(0, 60)}`)
+    if (seen.has(identity)) return []
+    seen.add(identity)
+    const score = Number(chunk.similarity ?? chunk.vector_similarity)
+    return [{
+      id: identity,
+      documentName,
+      snippet,
+      similarity: Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : null,
+    }]
+  })
+}
+
+function extractRagflowError(data) {
+  return String(data?.message || data?.error || data?.data?.message || '').trim()
 }
 
 async function parseQaResponse(response) {
