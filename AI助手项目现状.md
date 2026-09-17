@@ -8,11 +8,11 @@
 - 项目目录：`E:\Qwen-cc\aizhushou`
 - GitHub 仓库：<https://github.com/chenallens/aizhushou>
 - 当前分支：`main`
-- 当前功能基线（不含本文档提交）：`9f6e6a7`
+- 当前功能基线（不含本文档提交）：`83e9630`
 - 最后更新时间：2026-09-17
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.66`
 - 当前访问地址：`http://172.28.200.66/`
-- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，并兼容旧版接口和流内业务 404；连接超时与回答超时已分离，复杂问题长时间检索不会再被误判为连接失败。2026-09-17 v4 修复发布包已生成，服务器 `172.28.200.66` 等待升级。
+- 当前状态：制造四厂助手使用已确认可用的旧版 OpenAI 兼容流式接口；已取消 45 秒建连限制，整次回答默认最多等待 30 分钟，并增加逐请求阶段日志。2026-09-17 v5 修复发布包用于服务器 `172.28.200.66` 升级。
 
 ## 2. 项目目标
 
@@ -134,11 +134,12 @@ ${QA_API_BASE_URL}/api/intelli-search/v2/bots/${QA_BOT_ID}/chat
 
 - 首页名称为“制造四厂知识问答助手”，与制造一厂入口并列。
 - 点击首页四厂卡片后进入服务台内的原生聊天页面，不再依赖共享页面或 iframe 进行主要问答。
-- 后端依次尝试旧版 `chats_openai`、新版 OpenAI 兼容、新版原生和旧会话接口，将命中的 SSE 分片立即转发给浏览器；接口探测不仅检查 HTTP 状态，还读取首个 SSE 业务事件，HTTP 200 内包含 `NotFound 404` 时也会继续回退。
-- 新版原生接口通过 `session_id` 延续会话；旧版 OpenAI 兼容接口由浏览器发送最近对话历史，以保持连续追问。
+- 后端固定调用已在当前内网版本验证可用的 `/api/v1/chats_openai/{chat_id}/chat/completions`，不再逐个探测其他 RAGFlow 接口；SSE 分片到达后立即转发给浏览器。
+- 浏览器随请求发送最近对话历史，以保持连续追问；“新会话”会清空页面当前历史。
 - 页面提供停止生成、新会话和“在 RAGFlow 中打开”备用入口；新会话会清空当前 `session_id`。
 - 后端过滤 `start_to_think`、`end_to_think` 和 `<think>` 思考内容，只向页面发送正式回答，并整理 `reference.chunks` 为参考资料卡片。
-- 后端将建立 HTTP 连接限制为默认 45 秒；收到响应头后立即切换到默认 10 分钟的完整回答期限，并每 15 秒发送心跳。复杂问题等待首个分片期间不会继续使用 45 秒连接计时；Nginx 对四厂流式接口关闭代理缓冲。
+- 后端不再设置单独的 45 秒建连限制，一次请求从提交到结束默认最多等待 30 分钟，并每 15 秒向浏览器发送心跳；Nginx 对四厂流式接口关闭代理缓冲。
+- 每个请求生成独立日志编号，记录请求开始、等待、响应头、首个 SSE 事件、首段正文、上游结束、完成、超时或失败。日志只含阶段、耗时、状态码和字符数，不记录提问正文、文档内容或 API Key。
 - RAGFlow API Key、Chat ID 和共享备用地址只写入服务器 `.env`，不提交 GitHub，也不发送到浏览器。
 - 制造一厂和制造四厂分别记录 `qa_click`、`ragflow_click`，首页分别显示“制造一厂问答使用”和“制造四厂问答使用”。
 
@@ -370,8 +371,7 @@ QA_TLS_REJECT_UNAUTHORIZED=true
 RAGFLOW_API_BASE_URL=http://172.28.200.7
 RAGFLOW_API_KEY=
 RAGFLOW_CHAT_ID=
-RAGFLOW_CONNECT_TIMEOUT_MS=45000
-RAGFLOW_TOTAL_TIMEOUT_MS=600000
+RAGFLOW_TOTAL_TIMEOUT_MS=1800000
 RAGFLOW_CHAT_URL=
 
 AI_MODEL_API_URL=
@@ -389,7 +389,7 @@ MOCK_AI=false
 - `.env.example` 只提供字段和示例，真实服务器必须使用自己的 `.env`。
 - `RAGFLOW_API_KEY` 是在 RAGFlow 个人设置中创建的账号级 API Key，只保存在后端 `.env`。
 - `RAGFLOW_CHAT_ID` 填写四厂聊天助理 ID；当前助理无需改造成 Agent。
-- `RAGFLOW_CONNECT_TIMEOUT_MS` 只限制建立 HTTP 连接，默认 45 秒；`RAGFLOW_TOTAL_TIMEOUT_MS` 限制一次完整回答，默认 10 分钟。
+- `RAGFLOW_TOTAL_TIMEOUT_MS` 限制一次完整回答，默认 `1800000` 毫秒（30 分钟）；不再使用单独的建连超时变量。
 - `RAGFLOW_CHAT_URL` 仅用于“在 RAGFlow 中打开”备用按钮，可填写原完整共享聊天地址。
 
 ## 13. 本地开发与验证
@@ -424,7 +424,7 @@ npm run build
 - 术语逐条新增、修改、删除及 Markdown 同步。
 - 知识问答流式输出、思考内容过滤和引用链接。
 - 制造一厂和制造四厂均进入平台内原生聊天，四厂通过后端代理 RAGFlow 官方 SSE。
-- 四厂流式协议仿真验证了思考内容过滤、回答增量、引用资料、会话 ID 获取和连续追问；旧版仿真验证了新版接口连续返回 404 时会自动命中 `chats_openai`。
+- 四厂流式协议仿真验证了思考内容过滤、回答增量、引用资料和连续追问；另用延迟 47 秒才返回响应头的模拟服务验证不会在原 45 秒故障点中断，并能完整记录各阶段耗时。
 - 四厂备用跳转接口返回 `302`，从聊天页面使用备用入口时不会重复增加四厂统计。
 - 首页分别显示制造一厂、制造四厂问答使用次数。
 - 翻译三个阶段的流式进度。
@@ -440,13 +440,13 @@ npm run build
 ### 14.1 当前发布包
 
 - Nginx 目录：`E:\Qwen-cc\nginx-1.23.2`
-- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v4.zip`
-- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`（复杂问题首个分片超过 45 秒会误报连接超时，不建议部署）
+- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v5.zip`
+- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v4.zip`（仍有 45 秒等待响应头限制，不建议部署）
 - 发布包内置 Node.js：`v20.19.5`
 - 发布包说明：`AI_ASSISTANT_DEPLOYMENT.txt`
-- 最新包功能提交：`9f6e6a7`
-- 最新包大小：`103.28 MB`（`108292700` 字节）
-- 最新包 SHA-256：`EB35C65B7F5F31DABB771C98DE1A45DA627CD89770A0E212B0240ECB5B0E4045`
+- 最新包功能提交：`83e9630`
+- 最新包大小：`102.35 MB`（`107317143` 字节）
+- 最新包 SHA-256：`63E35CE301D3A66691D61DAF9778A3DE83AF151A8A74333593BD6F139C1B19D1`
 
 发布结构概要：
 
@@ -557,11 +557,12 @@ app/aizhushou/storage/
 | `2f482a1` | 增加旧版 RAGFlow OpenAI 兼容接口自动回退 |
 | `4653a42` | 支持 HTTP 200 响应流内业务 404 自动回退 |
 | `9f6e6a7` | 分离 RAGFlow 建连超时与完整回答超时 |
+| `83e9630` | 固定 RAGFlow 已验证接口、移除 45 秒建连限制并增加阶段日志 |
 
 ## 17. 已知限制与待关注事项
 
 - 内网模型和知识问答接口只能在对应网络环境中完成最终连通性验证。
-- 当前开发电脑连接 `172.28.200.7` 时被对端关闭，因此真实 RAGFlow 连通性需要在内网服务器部署后最终验证；本地已按官方协议完成 SSE 仿真联调。
+- RAGFlow 的真实复杂问题耗时取决于知识库检索和模型生成；阶段日志用于区分上游等待、SSE 首事件和正文传输时间。
 - PDF 扫描件和复杂表格的识别质量受原文件清晰度和模型能力影响。
 - 当前文档任务由单个 Node.js 进程在内存中调度，服务重启不会自动续跑未完成任务。
 - SQLite 适合当前单机内网部署；若后续需要多台服务器并发运行，应迁移到集中式数据库和任务队列。
@@ -700,6 +701,16 @@ app/aizhushou/storage/
 - 验证：将连接阈值缩短为 1 秒、模拟接口立即返回 HTTP 200 并延迟约 1.8 秒发送首个分片，最终仍正常流式回答；代码检查和构建通过。
 - Git 提交：`9f6e6a7`。
 - 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v4.zip`，大小 `103.28 MB`，SHA-256 为 `EB35C65B7F5F31DABB771C98DE1A45DA627CD89770A0E212B0240ECB5B0E4045`；已核对分离超时逻辑、已连接阶段提示、随包超时配置和前端无 Key 泄露。v3 不再建议部署。
+
+### 2026-09-17 - 取消 45 秒限制并增加 RAGFlow 阶段日志
+
+- 现象：v4 对复杂问题仍显示“连接 RAGFlow 超时”，说明 RAGFlow 可能在完成检索前不会立即返回 HTTP 响应头；45 秒建连计时器仍会提前中止有效请求。
+- 实现：固定使用已确认返回 HTTP 200 的 `chats_openai` 接口，不再探测其他路径；彻底移除 45 秒建连计时器；整次请求统一使用默认 30 分钟总上限；保留 15 秒 SSE 心跳，并每 30 秒记录当前等待阶段。
+- 日志：每个请求使用独立编号，记录 `request_started`、`upstream_request`、`response_headers`、`first_sse_event`、`first_answer_chunk`、`upstream_stream_ended`、`request_completed`、`request_timeout` 或 `request_failed`。发布环境日志位于 `logs\aizhushou-api.log`，日志不包含提问正文和密钥。
+- 数据或配置影响：数据库不变；删除 `RAGFLOW_CONNECT_TIMEOUT_MS`，将 `RAGFLOW_TOTAL_TIMEOUT_MS` 建议值改为 `1800000`。旧 `.env` 中残留的连接超时字段会被忽略。
+- 验证：`npm run lint`、`npm run build`、`git diff --check` 通过；使用延迟 47 秒才返回响应头的模拟 RAGFlow 验证请求越过原 45 秒故障点后仍正常流式完成，阶段日志完整。
+- Git 提交：`83e9630`。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v5.zip`，大小 `102.35 MB`，SHA-256 为 `63E35CE301D3A66691D61DAF9778A3DE83AF151A8A74333593BD6F139C1B19D1`；已检查压缩包入口、固定接口、30 分钟总上限、阶段日志、前端无 API Key，并通过 Nginx 配置检查。v4 不再建议部署。
 
 ### 后续记录模板
 
