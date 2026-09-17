@@ -8,11 +8,11 @@
 - 项目目录：`E:\Qwen-cc\aizhushou`
 - GitHub 仓库：<https://github.com/chenallens/aizhushou>
 - 当前分支：`main`
-- 当前功能基线（不含本文档提交）：`f91d954`
-- 最后更新时间：2026-09-16
+- 当前功能基线（不含本文档提交）：`d801b4a`
+- 最后更新时间：2026-09-17
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.66`
 - 当前访问地址：`http://172.28.200.66/`
-- 当前状态：制造四厂助手已由 iframe 嵌入改为新窗口打开，一厂和四厂使用次数已拆分显示；首页已移除“本月 / 本年活跃”卡片，问题意见列表仅管理员可见。2026-09-16 v3 发布包已生成，服务器 `172.28.200.66` 等待升级。
+- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，支持连续会话、停止生成、新会话、思考过滤和引用资料；一厂与四厂统计保持独立。首页已移除“本月 / 本年活跃”卡片，问题意见列表仅管理员可见。2026-09-17 发布包已生成，服务器 `172.28.200.66` 等待升级。
 
 ## 2. 项目目标
 
@@ -133,10 +133,13 @@ ${QA_API_BASE_URL}/api/intelli-search/v2/bots/${QA_BOT_ID}/chat
 ### 5.3 制造四厂 RAGFlow 助手
 
 - 首页名称为“制造四厂知识问答助手”，与制造一厂入口并列。
-- 点击首页四厂卡片后，通过平台跳转接口在新标签页或新窗口打开 RAGFlow 官方共享聊天；当前服务台首页保持不动。
-- 不再使用 iframe，避免 RAGFlow 共享聊天在嵌入环境中首字响应明显变慢。
-- 完整共享地址由 `RAGFLOW_CHAT_URL` 配置，含认证参数，只写入服务器 `.env`，不提交 GitHub。
-- 跳转接口验证地址协议，记录一次 `ragflow_click` 后返回 `302`，并设置禁止缓存与不发送来源页策略。
+- 点击首页四厂卡片后进入服务台内的原生聊天页面，不再依赖共享页面或 iframe 进行主要问答。
+- 后端调用 RAGFlow 官方 `POST /api/v1/chat/completions`，将 RAGFlow SSE 分片立即转发给浏览器；若服务器是旧版 RAGFlow，会兼容会话创建接口和旧版 completions 路径。
+- 第一次提问由 RAGFlow 自动创建 `session_id`，后续追问只发送新问题和同一个 `session_id`，由 RAGFlow 使用服务端历史记录，避免重复上传整段历史。
+- 页面提供停止生成、新会话和“在 RAGFlow 中打开”备用入口；新会话会清空当前 `session_id`。
+- 后端过滤 `start_to_think`、`end_to_think` 和 `<think>` 思考内容，只向页面发送正式回答，并整理 `reference.chunks` 为参考资料卡片。
+- 后端设有连接超时、总回答超时、心跳和浏览器断开中止，避免请求无限等待；Nginx 对四厂流式接口关闭代理缓冲。
+- RAGFlow API Key、Chat ID 和共享备用地址只写入服务器 `.env`，不提交 GitHub，也不发送到浏览器。
 - 制造一厂和制造四厂分别记录 `qa_click`、`ragflow_click`，首页分别显示“制造一厂问答使用”和“制造四厂问答使用”。
 
 ## 6. 翻译助手
@@ -321,6 +324,7 @@ GET    /api/admin/model-audit
 
 ```text
 POST   /api/qa/chat/stream
+POST   /api/ragflow/chat/stream
 POST   /api/translate/chat/stream
 POST   /api/translate/document
 POST   /api/pdf-to-word
@@ -363,6 +367,9 @@ QA_AUTH_CLIENT_SECRET=
 QA_DEFAULT_ACCOUNT=
 QA_TLS_REJECT_UNAUTHORIZED=true
 
+RAGFLOW_API_BASE_URL=http://172.28.200.7
+RAGFLOW_API_KEY=
+RAGFLOW_CHAT_ID=
 RAGFLOW_CHAT_URL=
 
 AI_MODEL_API_URL=
@@ -378,7 +385,9 @@ MOCK_AI=false
 - `QA_DEFAULT_ACCOUNT` 只填写 OA 账号，可作为测试或兜底身份。
 - 内网 HTTPS 证书无法通过校验时，可以使用 `QA_TLS_REJECT_UNAUTHORIZED=false`，但只应在可信内网中使用。
 - `.env.example` 只提供字段和示例，真实服务器必须使用自己的 `.env`。
-- `RAGFLOW_CHAT_URL` 应填写 RAGFlow 提供的完整共享聊天地址，包含查询参数；该值属于部署配置，不进入 Git。
+- `RAGFLOW_API_KEY` 是在 RAGFlow 个人设置中创建的账号级 API Key，只保存在后端 `.env`。
+- `RAGFLOW_CHAT_ID` 填写四厂聊天助理 ID；当前助理无需改造成 Agent。
+- `RAGFLOW_CHAT_URL` 仅用于“在 RAGFlow 中打开”备用按钮，可填写原完整共享聊天地址。
 
 ## 13. 本地开发与验证
 
@@ -411,8 +420,9 @@ npm run build
 - 普通用户提交反馈，管理员回复反馈。
 - 术语逐条新增、修改、删除及 Markdown 同步。
 - 知识问答流式输出、思考内容过滤和引用链接。
-- 制造一厂进入平台原生聊天，制造四厂从首页在新窗口打开 RAGFlow。
-- 四厂跳转接口返回 `302`、只增加一次四厂使用次数且不改变一厂次数。
+- 制造一厂和制造四厂均进入平台内原生聊天，四厂通过后端代理 RAGFlow 官方 SSE。
+- 四厂流式协议仿真验证了思考内容过滤、回答增量、引用资料、会话 ID 获取和连续追问。
+- 四厂备用跳转接口返回 `302`，从聊天页面使用备用入口时不会重复增加四厂统计。
 - 首页分别显示制造一厂、制造四厂问答使用次数。
 - 翻译三个阶段的流式进度。
 - Word 翻译、非 Word 文件拒绝和结果下载。
@@ -427,13 +437,13 @@ npm run build
 ### 14.1 当前发布包
 
 - Nginx 目录：`E:\Qwen-cc\nginx-1.23.2`
-- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260916-v3.zip`
-- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260916-v2.zip`（保留用于回退）
+- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917.zip`
+- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260916-v3.zip`（保留用于回退）
 - 发布包内置 Node.js：`v20.19.5`
 - 发布包说明：`AI_ASSISTANT_DEPLOYMENT.txt`
-- 最新包功能提交：`f91d954`
-- 最新包大小：`102.98 MB`（`107983516` 字节）
-- 最新包 SHA-256：`1826537E344E5A02C8381AC92E5D535409087FE86129B3F51A7E282852C29E0B`
+- 最新包功能提交：`d801b4a`
+- 最新包大小：`103.13 MB`（`108143715` 字节）
+- 最新包 SHA-256：`FBC477915F8F4694AC54334F63BC3D13812F4623D2A24794FDCDA508BB4BDC7A`
 
 发布结构概要：
 
@@ -465,6 +475,7 @@ Nginx 已对以下接口关闭代理缓冲：
 
 ```text
 /api/qa/chat/stream
+/api/ragflow/chat/stream
 /api/translate/chat/stream
 ```
 
@@ -501,15 +512,15 @@ app/aizhushou/storage/
 
 其中 `storage/aizhushou.sqlite` 包含反馈、统计、术语和管理员保存的标准解读提示词。直接用空白发布包覆盖服务器 `storage` 会丢失这些数据。
 
-从 2026-09-04 版本升级到当前版本时，不能把旧 `.env` 不加检查地整体覆盖回去。应保留旧服务器的账号、密钥和接口值，并补入新包中的 `RAGFLOW_CHAT_URL`，然后重启服务。
+从旧版本升级到当前版本时，不能把旧 `.env` 不加检查地整体覆盖回去。应保留旧服务器的账号、密钥和接口值，并补入 `RAGFLOW_API_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_CHAT_ID`，同时保留 `RAGFLOW_CHAT_URL` 作为备用入口，然后重启服务。
 
 ## 15. 关键设计决定
 
 - 项目是可直接使用的工作台，不做营销落地页。
 - 普通用户无需登录，管理员使用简单账号密码和 Session Cookie。
 - 知识问答沿用现有 OA 身份和云盘知识助手能力。
-- 制造四厂知识问答在新窗口打开 RAGFlow 官方共享聊天，不改变制造一厂原有 OA 认证和流式问答实现。
-- RAGFlow 地址只由后端跳转接口从 `.env` 读取，避免把认证参数写入公开源代码；浏览器跳转后最终地址仍会对使用者可见。
+- 制造四厂知识问答使用平台内原生聊天和 RAGFlow 官方 SSE 接口，不改变制造一厂原有 OA 认证和流式问答实现。
+- RAGFlow API Key 只由 Node 后端从 `.env` 读取；浏览器只访问本平台 `/api/ragflow/chat/stream`，不会接触 API Key。
 - 翻译词库由管理员逐条维护，不再要求管理员上传整份词库文件。
 - 翻译必须经过直接翻译、词库润色、质量检查三个阶段。
 - PDF、翻译和标准解读的下载结果统一保留 Markdown 源内容，不强行转成复杂 Word 原生样式。
@@ -539,11 +550,12 @@ app/aizhushou/storage/
 | `29a7625` | 管理员页面三个配置区域支持独立折叠，并默认收起 |
 | `d203c0b` | 增加制造四厂 RAGFlow 知识问答助手、双助手切换和合并统计 |
 | `67ca54d` | 四厂助手改为新窗口打开，并拆分一厂、四厂问答使用统计 |
+| `d801b4a` | 四厂助手重写为平台内原生 RAGFlow 流式聊天 |
 
 ## 17. 已知限制与待关注事项
 
 - 内网模型和知识问答接口只能在对应网络环境中完成最终连通性验证。
-- 浏览器可能根据自身设置把四厂助手打开为新标签页或独立窗口；二者都不再使用 iframe。
+- 当前开发电脑连接 `172.28.200.7` 时被对端关闭，因此真实 RAGFlow 连通性需要在内网服务器部署后最终验证；本地已按官方协议完成 SSE 仿真联调。
 - PDF 扫描件和复杂表格的识别质量受原文件清晰度和模型能力影响。
 - 当前文档任务由单个 Node.js 进程在内存中调度，服务重启不会自动续跑未完成任务。
 - SQLite 适合当前单机内网部署；若后续需要多台服务器并发运行，应迁移到集中式数据库和任务队列。
@@ -643,6 +655,15 @@ app/aizhushou/storage/
 - 数据或配置影响：无数据库迁移，无新增环境变量；升级时仍需保留服务器原有 `.env` 和 `storage`。
 - 验证：Nginx 配置、生产依赖、文件哈希、首页静态资源、普通用户反馈权限和管理员反馈读取联调通过；包内确认已移除月度/年度活跃卡片，并包含管理员权限保护代码。
 - 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260916-v3.zip`，大小 `102.98 MB`，SHA-256 为 `1826537E344E5A02C8381AC92E5D535409087FE86129B3F51A7E282852C29E0B`。
+
+### 2026-09-17 - 四厂助手改为原生 RAGFlow 流式聊天
+
+- 需求：解决 RAGFlow 共享页面响应慢、偶发长时间无回答的问题，直接通过 RAGFlow 官方聊天助理 API 在服务台中实现四厂问答。
+- 实现：增加 `/api/ragflow/chat/stream`；支持 RAGFlow 新旧接口、SSE 即时转发、会话 ID 延续、停止生成、新会话、引用资料、思考过滤、心跳与超时；首页四厂卡片改为进入平台原生聊天，并保留共享页面备用入口。
+- 数据或配置影响：数据库结构不变；`.env` 新增 `RAGFLOW_API_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_CHAT_ID`。真实 Key 已写入本机被 Git 忽略的 `.env`，未进入提交或文档。
+- 验证：`npm run lint`、`npm run build`、`git diff --check`、Nginx `-t` 通过；浏览器验证入口、流式显示和新会话；本地官方协议仿真验证思考内容不会显示、正式回答逐段返回、引用资料正常、追问复用同一 `session_id`。当前电脑无法完成内网 RAGFlow 真实请求，需部署后验证。
+- Git 提交：`d801b4a`。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917.zip`，大小 `103.13 MB`，SHA-256 为 `FBC477915F8F4694AC54334F63BC3D13812F4623D2A24794FDCDA508BB4BDC7A`；压缩包条目、当前前端构建、后端流式路由、Nginx 流式配置和随包 `.env` 配置均已核对。
 
 ### 后续记录模板
 
