@@ -8,11 +8,11 @@
 - 项目目录：`E:\Qwen-cc\aizhushou`
 - GitHub 仓库：<https://github.com/chenallens/aizhushou>
 - 当前分支：`main`
-- 当前功能基线（不含本文档提交）：`4653a42`
+- 当前功能基线（不含本文档提交）：`9f6e6a7`
 - 最后更新时间：2026-09-17
 - 当前部署服务器：Windows Server，内网地址 `172.28.200.66`
 - 当前访问地址：`http://172.28.200.66/`
-- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，并兼容 HTTP 200 响应流内返回业务 404 的旧版 RAGFlow；支持连续会话、停止生成、新会话、思考过滤和引用资料。2026-09-17 v3 修复发布包已生成，服务器 `172.28.200.66` 等待升级。
+- 当前状态：制造四厂助手已重写为平台内原生 RAGFlow 流式聊天，并兼容旧版接口和流内业务 404；连接超时与回答超时已分离，复杂问题长时间检索不会再被误判为连接失败。2026-09-17 v4 修复发布包已生成，服务器 `172.28.200.66` 等待升级。
 
 ## 2. 项目目标
 
@@ -138,7 +138,7 @@ ${QA_API_BASE_URL}/api/intelli-search/v2/bots/${QA_BOT_ID}/chat
 - 新版原生接口通过 `session_id` 延续会话；旧版 OpenAI 兼容接口由浏览器发送最近对话历史，以保持连续追问。
 - 页面提供停止生成、新会话和“在 RAGFlow 中打开”备用入口；新会话会清空当前 `session_id`。
 - 后端过滤 `start_to_think`、`end_to_think` 和 `<think>` 思考内容，只向页面发送正式回答，并整理 `reference.chunks` 为参考资料卡片。
-- 后端设有连接超时、总回答超时、心跳和浏览器断开中止，避免请求无限等待；Nginx 对四厂流式接口关闭代理缓冲。
+- 后端将建立 HTTP 连接限制为默认 45 秒；收到响应头后立即切换到默认 10 分钟的完整回答期限，并每 15 秒发送心跳。复杂问题等待首个分片期间不会继续使用 45 秒连接计时；Nginx 对四厂流式接口关闭代理缓冲。
 - RAGFlow API Key、Chat ID 和共享备用地址只写入服务器 `.env`，不提交 GitHub，也不发送到浏览器。
 - 制造一厂和制造四厂分别记录 `qa_click`、`ragflow_click`，首页分别显示“制造一厂问答使用”和“制造四厂问答使用”。
 
@@ -370,6 +370,8 @@ QA_TLS_REJECT_UNAUTHORIZED=true
 RAGFLOW_API_BASE_URL=http://172.28.200.7
 RAGFLOW_API_KEY=
 RAGFLOW_CHAT_ID=
+RAGFLOW_CONNECT_TIMEOUT_MS=45000
+RAGFLOW_TOTAL_TIMEOUT_MS=600000
 RAGFLOW_CHAT_URL=
 
 AI_MODEL_API_URL=
@@ -387,6 +389,7 @@ MOCK_AI=false
 - `.env.example` 只提供字段和示例，真实服务器必须使用自己的 `.env`。
 - `RAGFLOW_API_KEY` 是在 RAGFlow 个人设置中创建的账号级 API Key，只保存在后端 `.env`。
 - `RAGFLOW_CHAT_ID` 填写四厂聊天助理 ID；当前助理无需改造成 Agent。
+- `RAGFLOW_CONNECT_TIMEOUT_MS` 只限制建立 HTTP 连接，默认 45 秒；`RAGFLOW_TOTAL_TIMEOUT_MS` 限制一次完整回答，默认 10 分钟。
 - `RAGFLOW_CHAT_URL` 仅用于“在 RAGFlow 中打开”备用按钮，可填写原完整共享聊天地址。
 
 ## 13. 本地开发与验证
@@ -437,13 +440,13 @@ npm run build
 ### 14.1 当前发布包
 
 - Nginx 目录：`E:\Qwen-cc\nginx-1.23.2`
-- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`
-- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v2.zip`（不能处理 HTTP 200 内的业务 404，不建议部署）
+- 最新发布压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v4.zip`
+- 上一版压缩包：`E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`（复杂问题首个分片超过 45 秒会误报连接超时，不建议部署）
 - 发布包内置 Node.js：`v20.19.5`
 - 发布包说明：`AI_ASSISTANT_DEPLOYMENT.txt`
-- 最新包功能提交：`4653a42`
-- 最新包大小：`103.28 MB`（`108291775` 字节）
-- 最新包 SHA-256：`3B9EAF96B5EB7AEAA576941EFFCA291D6CFF641F791DFEEB420AFB415A3926E6`
+- 最新包功能提交：`9f6e6a7`
+- 最新包大小：`103.28 MB`（`108292700` 字节）
+- 最新包 SHA-256：`EB35C65B7F5F31DABB771C98DE1A45DA627CD89770A0E212B0240ECB5B0E4045`
 
 发布结构概要：
 
@@ -553,6 +556,7 @@ app/aizhushou/storage/
 | `d801b4a` | 四厂助手重写为平台内原生 RAGFlow 流式聊天 |
 | `2f482a1` | 增加旧版 RAGFlow OpenAI 兼容接口自动回退 |
 | `4653a42` | 支持 HTTP 200 响应流内业务 404 自动回退 |
+| `9f6e6a7` | 分离 RAGFlow 建连超时与完整回答超时 |
 
 ## 17. 已知限制与待关注事项
 
@@ -686,6 +690,16 @@ app/aizhushou/storage/
 - 验证：旧版首选接口直接流式成功；模拟旧版接口返回 HTTP 200 + NotFound 时，日志记录业务回退，随后新版 OpenAI 兼容接口流式成功；`npm run lint`、`npm run build` 和 `git diff --check` 通过。
 - Git 提交：`4653a42`。
 - 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v3.zip`，大小 `103.28 MB`，SHA-256 为 `3B9EAF96B5EB7AEAA576941EFFCA291D6CFF641F791DFEEB420AFB415A3926E6`；已确认包内旧版接口优先顺序、首事件业务错误探测和自动回退代码。v2 不再建议部署。
+
+### 2026-09-17 - 修复复杂问题误报连接超时
+
+- 现象：简单问题正常，复杂问题可能显示“连接 RAGFlow 超时”；刷新后再次提问又能回答。日志显示 `chats_openai` 已返回 HTTP 200。
+- 原因：HTTP 连接已经建立，但旧逻辑在等待第一个 SSE 回答分片时仍沿用 45 秒连接计时；复杂检索超过 45 秒即被中止，第二次请求因缓存预热可能变快。
+- 实现：收到任一 RAGFlow HTTP 响应头后立即取消连接计时，切换为 10 分钟完整回答计时；页面增加“RAGFlow 已连接，正在检索资料”阶段，心跳保持不变；增加两个可选超时环境变量。
+- 数据或配置影响：数据库不变；`.env` 可选增加 `RAGFLOW_CONNECT_TIMEOUT_MS=45000` 和 `RAGFLOW_TOTAL_TIMEOUT_MS=600000`，不填写时使用相同默认值。
+- 验证：将连接阈值缩短为 1 秒、模拟接口立即返回 HTTP 200 并延迟约 1.8 秒发送首个分片，最终仍正常流式回答；代码检查和构建通过。
+- Git 提交：`9f6e6a7`。
+- 部署包：已生成 `E:\Qwen-cc\aizhushou-nginx-windows-20260917-v4.zip`，大小 `103.28 MB`，SHA-256 为 `EB35C65B7F5F31DABB771C98DE1A45DA627CD89770A0E212B0240ECB5B0E4045`；已核对分离超时逻辑、已连接阶段提示、随包超时配置和前端无 Key 泄露。v3 不再建议部署。
 
 ### 后续记录模板
 
