@@ -37,6 +37,8 @@ const resultsDir = path.join(storageDir, 'results')
 const dbPath = path.join(storageDir, 'aizhushou.sqlite')
 const glossaryMarkdownPath = path.join(storageDir, 'glossary.md')
 const port = Number(process.env.SERVER_PORT || 4178)
+const ragflowConnectTimeoutMs = Math.max(1_000, Number(process.env.RAGFLOW_CONNECT_TIMEOUT_MS) || 45_000)
+const ragflowTotalTimeoutMs = Math.max(5_000, Number(process.env.RAGFLOW_TOTAL_TIMEOUT_MS) || 10 * 60_000)
 
 const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
 const defaultStandardPrompt = `你是制造企业标准解读专家。请准确理解上传标准，不改变原文事实、数值、单位和约束条件。
@@ -459,8 +461,19 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
   writeSse(res, { type: 'stage', stage: '正在连接 RAGFlow...' })
 
   const controller = new AbortController()
-  let firstByteTimer = setTimeout(() => controller.abort(new Error('连接 RAGFlow 超时')), 45_000)
+  let firstByteTimer = setTimeout(() => controller.abort(new Error('连接 RAGFlow 超时')), ragflowConnectTimeoutMs)
   let totalTimer = null
+  let upstreamConnected = false
+  const markUpstreamConnected = () => {
+    if (upstreamConnected) return
+    upstreamConnected = true
+    if (firstByteTimer) {
+      clearTimeout(firstByteTimer)
+      firstByteTimer = null
+    }
+    totalTimer = setTimeout(() => controller.abort(new Error('RAGFlow 回答超时')), ragflowTotalTimeoutMs)
+    writeSse(res, { type: 'stage', stage: 'RAGFlow 已连接，正在检索资料...' })
+  }
   const heartbeat = setInterval(() => {
     if (!res.writableEnded) res.write(': heartbeat\n\n')
   }, 15_000)
@@ -477,10 +490,8 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
       sessionId: requestedSessionId,
       messages: history,
       signal: controller.signal,
+      onConnected: markUpstreamConnected,
     })
-    clearTimeout(firstByteTimer)
-    firstByteTimer = null
-    totalTimer = setTimeout(() => controller.abort(new Error('RAGFlow 回答超时')), 10 * 60_000)
 
     if (!upstream.response.ok) {
       const data = await safeJson(upstream.response)
@@ -1230,7 +1241,7 @@ function ragflowHeaders(config) {
   }
 }
 
-async function openRagflowCompletion({ config, question, sessionId, messages, signal }) {
+async function openRagflowCompletion({ config, question, sessionId, messages, signal, onConnected }) {
   const openAiPaths = [
     { path: `/api/v1/chats_openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: false },
     { path: `/api/v1/openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: true },
@@ -1248,6 +1259,7 @@ async function openRagflowCompletion({ config, question, sessionId, messages, si
       body: JSON.stringify(openAiRequest),
       signal,
     })
+    onConnected?.()
     logRagflowAttempt(candidate.path, compatibleResponse.status)
     if ([404, 405].includes(compatibleResponse.status)) {
       await compatibleResponse.body?.cancel()
@@ -1276,6 +1288,7 @@ async function openRagflowCompletion({ config, question, sessionId, messages, si
     body: JSON.stringify(requestBody),
     signal,
   })
+  onConnected?.()
   logRagflowAttempt(nativePath, nativeResponse.status)
   if (![404, 405].includes(nativeResponse.status)) {
     const inspected = await inspectRagflowResponse(nativeResponse)
@@ -1300,6 +1313,7 @@ async function openRagflowCompletion({ config, question, sessionId, messages, si
     }),
     signal,
   })
+  onConnected?.()
   logRagflowAttempt(legacyPath, compatibleResponse.status)
   return { response: compatibleResponse, sessionId: compatibleSessionId, mode: 'native' }
 }
