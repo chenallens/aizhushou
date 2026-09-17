@@ -556,6 +556,12 @@ function RagflowQaView({ setNotice }) {
     if (!text || loading) return
 
     const assistantIndex = messages.length + 1
+    const requestMessages = [
+      ...messages.slice(1)
+        .filter((message) => !message.error && ['user', 'assistant'].includes(message.role) && message.content)
+        .map((message) => ({ role: message.role, content: message.content })),
+      { role: 'user', content: text },
+    ]
     setMessages((current) => [
       ...current,
       { role: 'user', content: text },
@@ -573,7 +579,7 @@ function RagflowQaView({ setNotice }) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: text, sessionId }),
+        body: JSON.stringify({ question: text, sessionId, messages: requestMessages }),
         signal: controller.signal,
       })
       if (!response.ok) {
@@ -615,6 +621,7 @@ function RagflowQaView({ setNotice }) {
         setMessages((current) => updateMessageAt(current, assistantIndex, {
           content: current[assistantIndex]?.content || '回答已停止。',
           streaming: false,
+          error: true,
         }))
       } else {
         setNotice(error.message)
@@ -622,6 +629,7 @@ function RagflowQaView({ setNotice }) {
           content: `调用失败：${error.message}`,
           references: [],
           streaming: false,
+          error: true,
         }))
       }
     } finally {

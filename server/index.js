@@ -429,6 +429,7 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
     res.status(400).json({ error: '单次提问不能超过 30000 字，请拆分后发送' })
     return
   }
+  const history = normalizeRagflowHistory(req.body?.messages, question)
 
   if (isMockMode()) {
     res.writeHead(200, sseHeaders())
@@ -474,6 +475,7 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
       config,
       question,
       sessionId: requestedSessionId,
+      messages: history,
       signal: controller.signal,
     })
     clearTimeout(firstByteTimer)
@@ -487,7 +489,7 @@ app.post('/api/ragflow/chat/stream', async (req, res) => {
 
     if (upstream.sessionId) writeSse(res, { type: 'session', sessionId: upstream.sessionId })
     writeSse(res, { type: 'stage', stage: '正在检索制造四厂知识库...' })
-    await streamRagflowResponse(upstream.response, res, upstream.sessionId)
+    await streamRagflowResponse(upstream.response, res, upstream.sessionId, upstream.mode)
   } catch (error) {
     if (!res.writableEnded) {
       const message = error.name === 'AbortError'
@@ -1228,7 +1230,7 @@ function ragflowHeaders(config) {
   }
 }
 
-async function openRagflowCompletion({ config, question, sessionId, signal }) {
+async function openRagflowCompletion({ config, question, sessionId, messages, signal }) {
   const requestBody = {
     chat_id: config.chatId,
     question,
@@ -1243,13 +1245,39 @@ async function openRagflowCompletion({ config, question, sessionId, signal }) {
     body: JSON.stringify(requestBody),
     signal,
   })
+  logRagflowAttempt('/api/v1/chat/completions', response.status)
   if (![404, 405].includes(response.status)) {
-    return { response, sessionId }
+    return { response, sessionId, mode: 'native' }
   }
 
   await response.body?.cancel()
+  const openAiPaths = [
+    { path: `/api/v1/openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: true },
+    { path: `/api/v1/chats_openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: false },
+  ]
+  for (const candidate of openAiPaths) {
+    const openAiRequest = {
+      model: 'model',
+      messages,
+      stream: true,
+    }
+    if (candidate.includeReferences) openAiRequest.extra_body = { reference: true }
+    const compatibleResponse = await fetch(`${config.baseUrl}${candidate.path}`, {
+      method: 'POST',
+      headers: ragflowHeaders(config),
+      body: JSON.stringify(openAiRequest),
+      signal,
+    })
+    logRagflowAttempt(candidate.path, compatibleResponse.status)
+    if (![404, 405].includes(compatibleResponse.status)) {
+      return { response: compatibleResponse, sessionId: '', mode: 'openai' }
+    }
+    await compatibleResponse.body?.cancel()
+  }
+
   const compatibleSessionId = sessionId || await createRagflowSession(config, signal)
-  const compatibleResponse = await fetch(`${config.baseUrl}/api/v1/chats/${encodeURIComponent(config.chatId)}/completions`, {
+  const legacyPath = `/api/v1/chats/${encodeURIComponent(config.chatId)}/completions`
+  const compatibleResponse = await fetch(`${config.baseUrl}${legacyPath}`, {
     method: 'POST',
     headers: ragflowHeaders(config),
     body: JSON.stringify({
@@ -1259,16 +1287,19 @@ async function openRagflowCompletion({ config, question, sessionId, signal }) {
     }),
     signal,
   })
-  return { response: compatibleResponse, sessionId: compatibleSessionId }
+  logRagflowAttempt(legacyPath, compatibleResponse.status)
+  return { response: compatibleResponse, sessionId: compatibleSessionId, mode: 'native' }
 }
 
 async function createRagflowSession(config, signal) {
-  const response = await fetch(`${config.baseUrl}/api/v1/chats/${encodeURIComponent(config.chatId)}/sessions`, {
+  const apiPath = `/api/v1/chats/${encodeURIComponent(config.chatId)}/sessions`
+  const response = await fetch(`${config.baseUrl}${apiPath}`, {
     method: 'POST',
     headers: ragflowHeaders(config),
     body: JSON.stringify({ name: `AI助手服务台 ${new Date().toLocaleString('zh-CN')}` }),
     signal,
   })
+  logRagflowAttempt(apiPath, response.status)
   const data = await safeJson(response)
   const sessionId = normalizeRagflowSessionId(data?.data?.id || data?.data?.session_id)
   if (!response.ok || data?.code !== 0 || !sessionId) {
@@ -1277,7 +1308,31 @@ async function createRagflowSession(config, signal) {
   return sessionId
 }
 
-async function streamRagflowResponse(response, res, initialSessionId = '') {
+function normalizeRagflowHistory(value, question) {
+  const messages = Array.isArray(value)
+    ? value
+      .filter((item) => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string')
+      .map((item) => ({ role: item.role, content: item.content.trim() }))
+      .filter((item) => item.content)
+      .slice(-20)
+    : []
+  const totalLength = messages.reduce((sum, item) => sum + item.content.length, 0)
+  if (totalLength > 60_000) {
+    while (messages.length > 1 && messages.reduce((sum, item) => sum + item.content.length, 0) > 60_000) {
+      messages.shift()
+    }
+  }
+  if (messages.at(-1)?.role !== 'user' || messages.at(-1)?.content !== question) {
+    messages.push({ role: 'user', content: question })
+  }
+  return messages
+}
+
+function logRagflowAttempt(apiPath, status) {
+  console.info(`[RAGFlow] ${apiPath} -> HTTP ${status}`)
+}
+
+async function streamRagflowResponse(response, res, initialSessionId = '', mode = 'native') {
   const contentType = response.headers.get('content-type') || ''
   if (contentType.includes('application/json')) {
     const event = await safeJson(response)
@@ -1286,7 +1341,7 @@ async function streamRagflowResponse(response, res, initialSessionId = '') {
       references: [],
       sessionId: initialSessionId,
       thinking: false,
-    }, res)
+    }, res, mode)
     if (result.error) throw new Error(result.error)
     finishRagflowStream(res, result.state)
     return
@@ -1306,7 +1361,7 @@ async function streamRagflowResponse(response, res, initialSessionId = '') {
     const parsed = consumeSseBlocks(buffer)
     buffer = parsed.remainder
     for (const event of parsed.events) {
-      const result = consumeRagflowEvent(event, state, res)
+      const result = consumeRagflowEvent(event, state, res, mode)
       if (result.error) throw new Error(result.error)
       state = result.state
     }
@@ -1315,7 +1370,7 @@ async function streamRagflowResponse(response, res, initialSessionId = '') {
   buffer += decoder.decode()
   const parsed = consumeSseBlocks(`${buffer}\n\n`)
   for (const event of parsed.events) {
-    const result = consumeRagflowEvent(event, state, res)
+    const result = consumeRagflowEvent(event, state, res, mode)
     if (result.error) throw new Error(result.error)
     state = result.state
   }
@@ -1344,9 +1399,12 @@ function consumeSseBlocks(value) {
   return { events, remainder }
 }
 
-function consumeRagflowEvent(event, previousState, res) {
+function consumeRagflowEvent(event, previousState, res, mode = 'native') {
   const state = { ...previousState }
   if (!event || typeof event !== 'object') return { state }
+  if (mode === 'openai' || Array.isArray(event.choices)) {
+    return consumeOpenAiRagflowEvent(event, state, res)
+  }
   if (Number(event.code || 0) !== 0) {
     return { state, error: extractRagflowError(event) || 'RAGFlow 返回业务错误' }
   }
@@ -1384,6 +1442,23 @@ function consumeRagflowEvent(event, previousState, res) {
   return { state }
 }
 
+function consumeOpenAiRagflowEvent(event, state, res) {
+  if (Number(event?.code || 0) !== 0) {
+    return { state, error: extractRagflowError(event) || 'RAGFlow OpenAI 兼容接口返回业务错误' }
+  }
+  const choice = Array.isArray(event?.choices) ? event.choices[0] : null
+  const fragment = choice?.delta?.content ?? choice?.message?.content ?? ''
+  if (fragment) {
+    state.answer = mergeRagflowAnswer(state.answer, stripRagflowThinking(fragment))
+    writeSse(res, { type: 'answer', answer: cleanRagflowAnswer(state.answer) })
+  }
+  const references = normalizeRagflowReferences(
+    event?.reference || event?.references || choice?.delta?.reference || choice?.message?.reference,
+  )
+  if (references.length) state.references = references
+  return { state }
+}
+
 function finishRagflowStream(res, state) {
   const answer = cleanRagflowAnswer(state.answer) || '未返回内容'
   writeSse(res, {
@@ -1415,7 +1490,11 @@ function cleanRagflowAnswer(value) {
 }
 
 function normalizeRagflowReferences(reference) {
-  const chunks = Array.isArray(reference?.chunks) ? reference.chunks : []
+  const chunks = Array.isArray(reference)
+    ? reference
+    : Array.isArray(reference?.chunks)
+      ? reference.chunks
+      : []
   const seen = new Set()
   return chunks.flatMap((chunk, index) => {
     if (!chunk || typeof chunk !== 'object') return []
