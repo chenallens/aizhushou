@@ -1231,29 +1231,9 @@ function ragflowHeaders(config) {
 }
 
 async function openRagflowCompletion({ config, question, sessionId, messages, signal }) {
-  const requestBody = {
-    chat_id: config.chatId,
-    question,
-    stream: true,
-    legacy: false,
-  }
-  if (sessionId) requestBody.session_id = sessionId
-
-  const response = await fetch(`${config.baseUrl}/api/v1/chat/completions`, {
-    method: 'POST',
-    headers: ragflowHeaders(config),
-    body: JSON.stringify(requestBody),
-    signal,
-  })
-  logRagflowAttempt('/api/v1/chat/completions', response.status)
-  if (![404, 405].includes(response.status)) {
-    return { response, sessionId, mode: 'native' }
-  }
-
-  await response.body?.cancel()
   const openAiPaths = [
-    { path: `/api/v1/openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: true },
     { path: `/api/v1/chats_openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: false },
+    { path: `/api/v1/openai/${encodeURIComponent(config.chatId)}/chat/completions`, includeReferences: true },
   ]
   for (const candidate of openAiPaths) {
     const openAiRequest = {
@@ -1269,10 +1249,43 @@ async function openRagflowCompletion({ config, question, sessionId, messages, si
       signal,
     })
     logRagflowAttempt(candidate.path, compatibleResponse.status)
-    if (![404, 405].includes(compatibleResponse.status)) {
-      return { response: compatibleResponse, sessionId: '', mode: 'openai' }
+    if ([404, 405].includes(compatibleResponse.status)) {
+      await compatibleResponse.body?.cancel()
+      continue
     }
-    await compatibleResponse.body?.cancel()
+    const inspected = await inspectRagflowResponse(compatibleResponse)
+    if (inspected.businessNotFound) {
+      console.info(`[RAGFlow] ${candidate.path} -> business NotFound, trying next endpoint`)
+      await inspected.response.body?.cancel()
+      continue
+    }
+    return { response: inspected.response, sessionId: '', mode: 'openai' }
+  }
+
+  const requestBody = {
+    chat_id: config.chatId,
+    question,
+    stream: true,
+    legacy: false,
+  }
+  if (sessionId) requestBody.session_id = sessionId
+  const nativePath = '/api/v1/chat/completions'
+  const nativeResponse = await fetch(`${config.baseUrl}${nativePath}`, {
+    method: 'POST',
+    headers: ragflowHeaders(config),
+    body: JSON.stringify(requestBody),
+    signal,
+  })
+  logRagflowAttempt(nativePath, nativeResponse.status)
+  if (![404, 405].includes(nativeResponse.status)) {
+    const inspected = await inspectRagflowResponse(nativeResponse)
+    if (!inspected.businessNotFound) {
+      return { response: inspected.response, sessionId, mode: 'native' }
+    }
+    console.info(`[RAGFlow] ${nativePath} -> business NotFound, trying next endpoint`)
+    await inspected.response.body?.cancel()
+  } else {
+    await nativeResponse.body?.cancel()
   }
 
   const compatibleSessionId = sessionId || await createRagflowSession(config, signal)
@@ -1289,6 +1302,55 @@ async function openRagflowCompletion({ config, question, sessionId, messages, si
   })
   logRagflowAttempt(legacyPath, compatibleResponse.status)
   return { response: compatibleResponse, sessionId: compatibleSessionId, mode: 'native' }
+}
+
+async function inspectRagflowResponse(response) {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const data = await safeJson(response)
+    const body = JSON.stringify(data || {})
+    const headers = new Headers(response.headers)
+    headers.delete('content-length')
+    return {
+      response: new Response(body, { status: response.status, statusText: response.statusText, headers }),
+      businessNotFound: isRagflowBusinessNotFound(data),
+    }
+  }
+  if (!response.body || !contentType.includes('text/event-stream')) {
+    return { response, businessNotFound: false }
+  }
+
+  const [probeBody, forwardBody] = response.body.tee()
+  const forwardedResponse = new Response(forwardBody, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+  const reader = probeBody.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let businessNotFound = false
+  try {
+    while (buffer.length < 256 * 1024) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parsed = consumeSseBlocks(buffer)
+      if (parsed.events.length) {
+        businessNotFound = isRagflowBusinessNotFound(parsed.events[0])
+        break
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return { response: forwardedResponse, businessNotFound }
+}
+
+function isRagflowBusinessNotFound(data) {
+  const code = Number(data?.code)
+  const message = extractRagflowError(data)
+  return code === 404 || /notfound|404\s*:\s*not found/i.test(message)
 }
 
 async function createRagflowSession(config, signal) {
