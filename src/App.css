@@ -1688,3 +1688,11 @@ h2 {
     justify-items: start;
   }
 }
+.ssoPage{min-height:100svh;display:grid;place-items:center;padding:24px;background:#f6f9fc}
+.ssoStatus{width:100%;max-width:420px;text-align:center;color:var(--ink)}
+.ssoBrand{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:42px;font-size:19px}
+.ssoStatusIcon{display:grid;place-items:center;width:54px;height:54px;margin:0 auto 17px;color:var(--blue);background:#eaf3ff;border-radius:8px}
+.ssoStatusIcon.failed{color:#ad4040;background:#fff0ef}
+.ssoStatus h1{font-size:21px;line-height:1.5;margin:0 0 12px;letter-spacing:0}
+.ssoStatus p{font-size:14px;color:var(--muted);line-height:1.8;overflow-wrap:anywhere;margin:0}
+.ssoStatus>a{display:inline-flex;align-items:center;gap:5px;min-height:36px;margin-top:22px;text-decoration:none;font-size:13px}

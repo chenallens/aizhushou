@@ -7,6 +7,7 @@ import { normalizeMdmSnapshot } from './mdm-normalize.js'
 import { createMdmSnapshotRecorder, readLatestMdmSnapshot } from './mdm-snapshots.js'
 import { createUsageStats } from './usage-stats.js'
 import { organizationIndex } from './organization.js'
+import {createSsoClient,SsoError} from './sso-client.js'
 
 const scrypt = promisify(crypto.scrypt)
 const initialPassword = '123456'
@@ -90,6 +91,7 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (user_id,role_id));
     CREATE TABLE IF NOT EXISTS login_sessions (sid TEXT PRIMARY KEY, data_json TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS sso_ticket_uses (ticket_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS organization_sync_runs (id TEXT PRIMARY KEY, trigger TEXT NOT NULL, actor_id TEXT, status TEXT NOT NULL,
       stage TEXT NOT NULL, counts_json TEXT NOT NULL DEFAULT '{}', error TEXT, started_at TEXT NOT NULL, finished_at TEXT);
     CREATE TABLE IF NOT EXISTS administration_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT, action TEXT NOT NULL,
@@ -159,6 +161,8 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
   const dummyHash = await hashPassword(crypto.randomBytes(16).toString('hex'))
   const stats = createUsageStats({all,get,run})
   const mdm = createMdmClient()
+  const sso=createSsoClient()
+  const pendingSsoTickets=new Set()
   let syncRunning = false
   const loginAttempts = new Map()
 
@@ -179,6 +183,10 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
   function attachUser(req,_res,next) {
     const row = req.session?.userId ? get('SELECT * FROM users WHERE id = ?', [req.session.userId]) : null
     req.user = row?.active && row.auth_version === req.session.authVersion ? publicUser(row) : null
+    if(req.user) {
+      req.user.authMethod=req.session.authMethod==='portal'?'portal':'password'
+      if(req.user.authMethod==='portal')req.user.mustChangePassword=false
+    }
     if (req.session?.userId && !req.user) { delete req.session.userId; delete req.session.authVersion }
     next()
   }
@@ -325,6 +333,41 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
   }
 
   function registerRoutes(app) {
+    app.get('/api/sso/login',async(req,res)=>{
+      const requestId=crypto.randomUUID(),startedAt=Date.now()
+      const ticket=typeof req.query.ticket==='string'?req.query.ticket:''
+      const ticketHash=ticket?crypto.createHash('sha256').update(ticket).digest('hex'):null
+      const log=(event,details={})=>{
+        const line=JSON.stringify({timestamp:timestamp(),requestId,event,elapsedMs:Date.now()-startedAt,...details})
+        console.info(`[SSO:${requestId.slice(0,8)}] ${line}`)
+        try {fs.appendFileSync(path.join(syncLogDir,'sso-login.log'),`${line}\n`)} catch {console.warn('[SSO] 登录日志写入失败')}
+      }
+      res.set({'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+      let reserved=false,sessionReplaced=false
+      log('started')
+      try {
+        if(ticketHash&&(pendingSsoTickets.has(ticketHash)||get('SELECT ticket_hash FROM sso_ticket_uses WHERE ticket_hash=? AND expires_at>?',[ticketHash,Date.now()])))throw new SsoError('SSO_TICKET_REUSED','登录凭证已使用，请从门户重新进入',401)
+        if(ticketHash){pendingSsoTickets.add(ticketHash);reserved=true}
+        const username=await sso.checkTicket(ticket)
+        log('ticket_verified')
+        run('DELETE FROM sso_ticket_uses WHERE expires_at<=?',[Date.now()])
+        run('INSERT OR REPLACE INTO sso_ticket_uses (ticket_hash,expires_at) VALUES (?,?)',[ticketHash,Date.now()+24*3600_000])
+        const row=get('SELECT * FROM users WHERE lower(username)=lower(?) AND active=1 AND builtin=0',[username])
+        if(!row)throw new SsoError('SSO_USER_NOT_FOUND','平台没有对应的可用员工账号，请联系管理员同步人员',403)
+        await new Promise((resolve,reject)=>req.session.regenerate(error=>error?reject(error):resolve()))
+        sessionReplaced=true
+        req.session.userId=row.id;req.session.authVersion=row.auth_version;req.session.authMethod='portal'
+        transaction(()=>audit(publicUser(row),'account.sso-login',row.id,{method:'portal'}))
+        await new Promise((resolve,reject)=>req.session.save(error=>error?reject(error):resolve()))
+        log('completed')
+        res.json({ok:true,redirectUrl:'/'})
+      } catch(error) {
+        if(sessionReplaced){await new Promise(resolve=>req.session.destroy(()=>resolve()));res.clearCookie('aizhushou.sid')}
+        const failure=error instanceof SsoError?error:new SsoError('SSO_SESSION_FAILED','平台登录会话建立失败，请联系管理员',500)
+        log('failed',{code:failure.code})
+        res.status(failure.status).json({error:failure.message,code:failure.code,...(failure.code==='SSO_USER_NOT_FOUND'?{redirectUrl:sso.forbiddenUrl}:{})})
+      } finally {if(reserved)pendingSsoTickets.delete(ticketHash)}
+    })
     app.get('/api/me',(req,res)=>res.json(req.user ? { ...req.user,authenticated:true } : {authenticated:false,isAdmin:false,isSuperAdmin:false,roles:[],permissions:[]}))
     app.post('/api/login',async(req,res)=>{
       const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'')
@@ -342,6 +385,7 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
       loginAttempts.delete(attemptKey)
       await new Promise((resolve,reject)=>req.session.regenerate(error=>error?reject(error):resolve()))
       req.session.userId=row.id;req.session.authVersion=row.auth_version
+      req.session.authMethod='password'
       res.json({ok:true,...publicUser(row),authenticated:true})
     })
     app.post('/api/logout',(req,res)=>req.session.destroy(()=>{res.clearCookie('aizhushou.sid');res.json({ok:true})}))
@@ -405,6 +449,7 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
       try {
         stats.archiveDue()
         run('DELETE FROM login_sessions WHERE expires_at<=?',[Date.now()])
+        run('DELETE FROM sso_ticket_uses WHERE expires_at<=?',[Date.now()])
         const slot=latestWeeklySlot()
         const initialized=get("SELECT id FROM organization_sync_runs WHERE status='completed' LIMIT 1")
         const attempted=get("SELECT id FROM organization_sync_runs WHERE started_at>=? AND (trigger='scheduled' OR status='completed') LIMIT 1",[slot])

@@ -72,6 +72,7 @@ const upload = multer({
 
 const app = express()
 app.set('trust proxy', 1)
+app.use(['/sso/login','/api/sso/login'],(_req,res,next)=>{res.set({'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});next()})
 app.use(cookieParser())
 app.use(express.json({ limit: '2mb' }))
 app.use(

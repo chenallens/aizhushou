@@ -6,6 +6,7 @@ import {
   BookOpenCheck,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   CircleUserRound,
   Database,
   Download,
@@ -40,6 +41,42 @@ const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: fals
 const assistantUsageTypes = { qa: 'qa', ragflow: 'ragflow', translate: 'translation', pdf: 'pdf', standard1: 'standard', standard2: 'standard', standard3: 'standard' }
 
 function App() {
+  return /^\/sso\/login\/?$/.test(window.location.pathname)?<SsoLoginView/>:<Workbench/>
+}
+
+function SsoLoginView() {
+  const [error,setError]=useState('')
+  const entry=useRef(null)
+  if(!entry.current) {
+    const tickets=new URLSearchParams(window.location.search).getAll('ticket')
+    entry.current={ticket:tickets.length===1?tickets[0]:'',request:null}
+  }
+  useEffect(()=>{
+    let active=true
+    // StrictMode re-runs effects; share the exchange so a one-time ticket is checked only once.
+    if(!entry.current.request) {
+      window.history.replaceState(null,'','/sso/login')
+      const params=new URLSearchParams({ticket:entry.current.ticket})
+      entry.current.ticket=''
+      entry.current.request=fetch(`/api/sso/login?${params}`,{credentials:'same-origin',cache:'no-store'}).then(async response=>{
+        const data=await response.json()
+        return {ok:response.ok,data}
+      })
+    }
+    entry.current.request.then(({ok,data})=>{
+      if(!active)return
+      if(ok)window.location.replace('/')
+      else if(data.code==='SSO_USER_NOT_FOUND'&&data.redirectUrl)window.location.replace(data.redirectUrl)
+      else setError(data.error||'门户登录失败，请从门户重新进入')
+    }).catch(()=>{if(active)setError('门户登录连接失败，请从门户重新进入或联系管理员')})
+    return ()=>{active=false}
+  },[])
+  return <main className="ssoPage"><section className="ssoStatus" aria-live="polite" aria-busy={!error}><div className="ssoBrand"><span className="brandMark"><Factory size={22}/></span><strong>AI助手服务台</strong></div>
+    <div className={`ssoStatusIcon ${error?'failed':''}`}>{error?<AlertCircle size={28}/>:<RefreshCw className="spinning" size={28}/>}</div><h1>{error?'门户登录未完成':'正在登录'}</h1><p>{error||'正在验证门户登录信息...'}</p>{error&&<a className="ghost" href="/"><ChevronLeft size={17}/>返回首页</a>}
+  </section></main>
+}
+
+function Workbench() {
   const [view, setView] = useState('home')
   const [statsRevision, setStatsRevision] = useState(0)
   const [feedback, setFeedback] = useState({ items: [], total: 0, totalPages: 1 })
@@ -147,7 +184,7 @@ function App() {
             <>
               {me.isAdmin && !me.mustChangePassword && <button className={view === 'admin' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('admin')} title="内容管理"><Settings2 size={17} />内容管理</button>}
               {me.isSuperAdmin && !me.mustChangePassword && <button className={view === 'permissions' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('permissions')}><ShieldCheck size={17} />权限中心</button>}
-              <details className="accountMenu"><summary><CircleUserRound size={18} /><span>{me.name || me.username}</span><ChevronDown size={15} /></summary><div className="accountDropdown"><strong>{me.name}</strong><p>{me.username} · {me.departmentName}</p>{!me.builtin && <button className="ghost" type="button" onClick={() => setPasswordOpen(true)}><KeyRound size={16} />修改密码</button>}<button className="ghost" type="button" onClick={() => logout().catch(error => setNotice(error.message))}><LogOut size={16} />退出登录</button></div></details>
+              <details className="accountMenu"><summary><CircleUserRound size={18} /><span>{me.name || me.username}</span><ChevronDown size={15} /></summary><div className="accountDropdown"><strong>{me.name}</strong><p>{me.username} · {me.departmentName}</p>{!me.builtin && <button className="ghost" type="button" onClick={() => setPasswordOpen(true)}><KeyRound size={16} />{me.authMethod==='portal'?'修改本平台密码':'修改密码'}</button>}<button className="ghost" type="button" onClick={() => logout().catch(error => setNotice(error.message))}><LogOut size={16} />退出登录</button></div></details>
             </>
           ) : (
             <button className="ghost iconText" type="button" onClick={() => setLoginOpen(true)}>

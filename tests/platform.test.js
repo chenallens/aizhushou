@@ -68,11 +68,23 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
   let employees=Array.from({length:6},(_,index)=>({employeeId:`e${index+1}`,code:`oa100${index+1}`,name:['张明','李敏','王磊','陈静','赵婷','杨帆'][index],deptId:index<3?'melt':index===3?'p2':'quality',deptTopId:index<3?'p1':index===3?'p2':'quality'}))
   let fail=false,partial=false,authorizationRetry=true,tokenRequests=0
   const requestedPaths=[]
+  const checkedTickets=[]
   const fixture=http.createServer(async(req,res)=>{
     const body=[];for await (const chunk of req) body.push(chunk)
     const text=Buffer.concat(body).toString()
     requestedPaths.push(req.url)
     res.setHeader('Content-Type','application/json')
+    if(req.url.startsWith('/sso/checkTicket')) {
+      const ticket=new URL(req.url,'http://localhost').searchParams.get('ticket')
+      checkedTickets.push(ticket)
+      if(ticket==='sso-concurrent')await pause(100)
+      const replies={
+        'sso-ticket-valid':{data:'OA1001'},'sso-relogin':{code:200,data:'oa1001'},
+        'sso-unknown':{data:'wst-unknown'},'sso-builtin':{data:'admin'},'sso-disabled-account':{data:'oa1002'},
+        'sso-rejected':{code:500,data:'oa1001'},'sso-concurrent':{data:'oa1003'},
+      }
+      res.end(JSON.stringify(replies[ticket]||{code:500,data:null}));return
+    }
     if(req.url==='/oauth/oauth/token') {
       assert.equal(new URLSearchParams(text).get('grant_type'),'client_credentials')
       tokenRequests++
@@ -93,7 +105,7 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
   const appPort=reservation.address().port
   await new Promise(resolve=>reservation.close(resolve))
   let logs=''
-  const child=spawn(process.execPath,['server/index.js'],{cwd:projectDir,windowsHide:true,env:{...process.env,STORAGE_DIR:storage,SERVER_PORT:String(appPort),ADMIN_USERNAME:'admin',ADMIN_PASSWORD:'integration-admin',SESSION_SECRET:'integration-session',MOCK_AI:'true',MDM_API_BASE_URL:`http://127.0.0.1:${mdmPort}`,MDM_CLIENT_ID:'fixture-client',MDM_CLIENT_SECRET:'fixture-secret',PLATFORM_SCHEDULER_DISABLED:'true'}})
+  const child=spawn(process.execPath,['server/index.js'],{cwd:projectDir,windowsHide:true,env:{...process.env,STORAGE_DIR:storage,SERVER_PORT:String(appPort),ADMIN_USERNAME:'admin',ADMIN_PASSWORD:'integration-admin',SESSION_SECRET:'integration-session',MOCK_AI:'true',MDM_API_BASE_URL:`http://127.0.0.1:${mdmPort}`,MDM_CLIENT_ID:'fixture-client',MDM_CLIENT_SECRET:'fixture-secret',SSO_ENABLED:'true',SSO_CHECK_TICKET_URL:`http://127.0.0.1:${mdmPort}/sso/checkTicket`,SSO_FORBIDDEN_URL:'http://192.168.50.87:8888/403',PLATFORM_SCHEDULER_DISABLED:'true'}})
   child.stdout.on('data',data=>logs+=data)
   child.stderr.on('data',data=>logs+=data)
   t.after(async()=>{child.kill();await new Promise(resolve=>{if(child.exitCode!==null)resolve();else child.once('exit',resolve)});fixture.closeAllConnections();await new Promise(resolve=>fixture.close(resolve))})
@@ -274,6 +286,56 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
     await request('/api/admin/users/mdm%3Ae1/reset-password',{method:'POST',client:admin})
     assert.equal((await request('/api/me',{client:employee})).authenticated,false)
     assert.equal((await request('/api/login',{method:'POST',body:{username:'oa1001',password:'123456'},client:employee})).mustChangePassword,true)
+  })
+  await t.test('Portal sessions bypass only local first-password prompts and preserve scoped roles',async()=>{
+    const portal={cookie:employee.cookie}
+    const oldCookie=portal.cookie
+    const result=await request('/api/sso/login?ticket=sso-ticket-valid&username=admin',{client:portal})
+    assert.equal(result.redirectUrl,'/')
+    assert.notEqual(portal.cookie,oldCookie)
+    const me=await request('/api/me',{client:portal})
+    assert.equal(me.username,'oa1001')
+    assert.equal(me.authMethod,'portal')
+    assert.equal(me.mustChangePassword,false)
+    assert.equal(me.isSuperAdmin,false)
+    assert.ok(me.roles.includes('glossary_admin'))
+    await request('/api/usage/qa',{method:'POST',client:portal,body:{requestId:'sso-usage-request'}})
+    await request('/api/admin/users',{client:portal,expected:403})
+    const local={}
+    assert.equal((await request('/api/login',{method:'POST',client:local,body:{username:'oa1001',password:'123456'}})).mustChangePassword,true)
+    assert.equal((await request('/api/me',{client:local})).authMethod,'password')
+    await request('/api/sso/login?ticket=sso-ticket-valid',{client:local,expected:401})
+    assert.equal(checkedTickets.filter(ticket=>ticket==='sso-ticket-valid').length,1)
+    await request('/api/admin/users/mdm%3Ae1/reset-password',{method:'POST',client:admin})
+    assert.equal((await request('/api/me',{client:portal})).authenticated,false)
+    await request('/api/sso/login?ticket=sso-relogin',{client:portal})
+    assert.equal((await request('/api/me',{client:portal})).mustChangePassword,false)
+    await request('/api/logout',{method:'POST',client:portal})
+    assert.equal((await request('/api/me',{client:portal})).authenticated,false)
+  })
+  await t.test('Unknown, inactive and built-in accounts are denied; ticket validation is single-use and logged without secrets',async()=>{
+    for(const ticket of ['sso-unknown','sso-builtin','sso-disabled-account']) {
+      const guest={}
+      const failure=await request(`/api/sso/login?ticket=${ticket}`,{client:guest,expected:403})
+      assert.equal(failure.redirectUrl,'http://192.168.50.87:8888/403')
+      assert.equal((await request('/api/me',{client:guest})).authenticated,false)
+    }
+    await request('/api/sso/login?ticket=sso-rejected',{expected:401})
+    await request('/api/sso/login',{expected:400})
+    await request('/api/sso/login?ticket=a&ticket=b',{expected:400})
+    const concurrent=await Promise.all([200,401].map(async()=>{
+      const response=await fetch(`${origin}/api/sso/login?ticket=sso-concurrent`)
+      await response.json();return response.status
+    }))
+    assert.deepEqual(concurrent.sort(),[200,401])
+    assert.equal(checkedTickets.filter(ticket=>ticket==='sso-concurrent').length,1)
+    const journal=await fs.readFile(path.join(storage,'logs','sso-login.log'),'utf8')
+    assert.ok(journal.includes('"event":"ticket_verified"'))
+    assert.ok(journal.includes('"event":"completed"'))
+    assert.ok(journal.includes('"code":"SSO_TICKET_REUSED"'))
+    assert.ok(!journal.includes('sso-ticket-valid'))
+    assert.ok(!journal.includes('oa1001'))
+    assert.ok(!logs.includes('sso-ticket-valid'))
   })
   assert.ok(!logs.includes('fixture-secret'))
 })
