@@ -6,6 +6,7 @@ import {
   BookOpenCheck,
   CheckCircle2,
   ChevronDown,
+  CircleUserRound,
   Database,
   Download,
   ExternalLink,
@@ -14,6 +15,7 @@ import {
   FileOutput,
   FileText,
   Languages,
+  KeyRound,
   LogIn,
   LogOut,
   MessageSquare,
@@ -32,74 +34,80 @@ import {
   X,
 } from 'lucide-react'
 import './App.css'
+import { Pagination, PermissionsCenter, UsageStatistics } from './PlatformViews.jsx'
 
-const emptyStats = {
-  qaNativeUses: 0,
-  ragflowUses: 0,
-  translationUses: 0,
-  pdfUses: 0,
-  standardUses: 0,
-  active: { day: 0, month: 0, year: 0 },
-}
+const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: false, permissions: [], roles: [] }
+const assistantUsageTypes = { qa: 'qa', ragflow: 'ragflow', translate: 'translation', pdf: 'pdf', standard1: 'standard', standard2: 'standard', standard3: 'standard' }
 
 function App() {
   const [view, setView] = useState('home')
-  const [stats, setStats] = useState(emptyStats)
-  const [feedback, setFeedback] = useState([])
-  const [me, setMe] = useState({ isAdmin: false, username: null })
+  const [statsRevision, setStatsRevision] = useState(0)
+  const [feedback, setFeedback] = useState({ items: [], total: 0, totalPages: 1 })
+  const [feedbackPage, setFeedbackPage] = useState(1)
+  const [feedbackRevision, setFeedbackRevision] = useState(0)
+  const [me, setMe] = useState(anonymousUser)
   const [notice, setNotice] = useState('')
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const [pendingView, setPendingView] = useState(null)
   const [oaCode] = useState(() => new URLSearchParams(window.location.search).get('code') || '')
 
   useEffect(() => {
     async function boot() {
       await api('/api/visit', { method: 'POST' })
-      const currentMe = await refreshMe()
-      await Promise.all([
-        refreshStats(),
-        currentMe.isAdmin ? refreshFeedback() : Promise.resolve(),
-      ])
+      const initialUser = await api('/api/me')
+      setMe(initialUser)
+      if (initialUser.mustChangePassword) setPasswordOpen(true)
+      setStatsRevision(value => value + 1)
     }
     boot().catch((error) => setNotice(error.message))
   }, [])
 
-  async function refreshStats() {
-    const data = await api('/api/stats')
-    setStats(data)
-  }
+  useEffect(() => {
+    const controller = new AbortController()
+    api(`/api/feedback?page=${feedbackPage}`, { signal: controller.signal }).then(setFeedback)
+      .catch(error => { if (!controller.signal.aborted) setNotice(error.message) })
+    return () => controller.abort()
+  }, [feedbackPage, feedbackRevision])
 
-  async function refreshFeedback() {
-    const data = await api('/api/feedback')
-    setFeedback(data.items || [])
-  }
+  useEffect(() => {
+    const requireLogin = () => { setMe(anonymousUser); setView('home'); setLoginOpen(true) }
+    const requirePassword = () => { setPasswordOpen(true) }
+    window.addEventListener('platform-login-required', requireLogin)
+    window.addEventListener('platform-password-required', requirePassword)
+    return () => { window.removeEventListener('platform-login-required', requireLogin); window.removeEventListener('platform-password-required', requirePassword) }
+  }, [])
 
   async function refreshMe() {
     const data = await api('/api/me')
     setMe(data)
+    if (data.mustChangePassword) setPasswordOpen(true)
+    if (view === 'permissions' && !data.isSuperAdmin) setView('home')
+    if (view === 'admin' && !data.isAdmin) setView('home')
     return data
   }
 
   async function openAssistant(nextView) {
-    const usageType = {
-      qa: 'qa',
-      translate: 'translation',
-      pdf: 'pdf',
-      standard1: 'standard',
-      standard2: 'standard',
-      standard3: 'standard',
-      ragflow: 'ragflow',
-    }[nextView]
-    if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST' })
+    if (!me.authenticated) { setPendingView(nextView); setLoginOpen(true); return }
+    if (me.mustChangePassword) { setPendingView(nextView); setPasswordOpen(true); return }
+    try { await enterAssistant(nextView) } catch (error) { setNotice(error.message) }
+  }
+
+  async function enterAssistant(nextView) {
+    const usageType = assistantUsageTypes[nextView]
+    if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: createUsageRequestId() }) })
     setView(nextView)
-    refreshStats().catch(() => {})
+    setStatsRevision(value => value + 1)
   }
 
   async function logout() {
     await api('/api/logout', { method: 'POST' })
-    setMe({ isAdmin: false, username: null })
-    setFeedback([])
-    setNotice('管理员已退出')
+    setMe(anonymousUser)
+    setView('home')
+    setPasswordOpen(false)
+    setPendingView(null)
+    setNotice('已退出登录')
   }
 
   return (
@@ -132,21 +140,18 @@ function App() {
         </nav>
 
         <div className="adminControls">
-          <button className="primary" type="button" onClick={() => setFeedbackOpen(true)}>
+          <button className="primary" type="button" onClick={() => { if (!me.authenticated) setLoginOpen(true); else if (me.mustChangePassword) setPasswordOpen(true); else setFeedbackOpen(true) }}>
             <MessageSquare size={18} /> 问题反馈
           </button>
-          {me.isAdmin ? (
+          {me.authenticated ? (
             <>
-              <button className={view === 'admin' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('admin')}>
-                <ShieldCheck size={17} /> 管理
-              </button>
-              <button className="ghost iconText" type="button" onClick={logout} title="退出管理员">
-                <LogOut size={17} /> 退出
-              </button>
+              {me.isAdmin && !me.mustChangePassword && <button className={view === 'admin' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('admin')} title="内容管理"><Settings2 size={17} />内容管理</button>}
+              {me.isSuperAdmin && !me.mustChangePassword && <button className={view === 'permissions' ? 'active ghost' : 'ghost'} type="button" onClick={() => setView('permissions')}><ShieldCheck size={17} />权限中心</button>}
+              <details className="accountMenu"><summary><CircleUserRound size={18} /><span>{me.name || me.username}</span><ChevronDown size={15} /></summary><div className="accountDropdown"><strong>{me.name}</strong><p>{me.username} · {me.departmentName}</p>{!me.builtin && <button className="ghost" type="button" onClick={() => setPasswordOpen(true)}><KeyRound size={16} />修改密码</button>}<button className="ghost" type="button" onClick={() => logout().catch(error => setNotice(error.message))}><LogOut size={16} />退出登录</button></div></details>
             </>
           ) : (
             <button className="ghost iconText" type="button" onClick={() => setLoginOpen(true)}>
-              <LogIn size={17} /> 管理员登录
+              <LogIn size={17} /> 登录
             </button>
           )}
         </div>
@@ -161,11 +166,13 @@ function App() {
 
       {view === 'home' && (
         <HomeView
-          stats={stats}
+          statsRevision={statsRevision}
           feedback={feedback}
-          isAdmin={me.isAdmin}
+          feedbackPage={feedbackPage}
+          onFeedbackPage={setFeedbackPage}
+          isAdmin={me.isSuperAdmin}
           onOpenAssistant={openAssistant}
-          onReplySaved={refreshFeedback}
+          onReplySaved={() => setFeedbackRevision(value => value + 1)}
           setNotice={setNotice}
         />
       )}
@@ -176,8 +183,10 @@ function App() {
       {view === 'standard1' && <StandardView plant={1} setNotice={setNotice} />}
       {view === 'standard2' && <StandardView plant={2} setNotice={setNotice} />}
       {view === 'standard3' && <StandardView plant={3} setNotice={setNotice} />}
-      {view === 'admin' && (
+      {view === 'permissions' && <PermissionsCenter api={api} me={me} setNotice={setNotice} onUserChanged={refreshMe} />}
+      {view === 'admin' && !me.mustChangePassword && (
         <AdminView
+          me={me}
           isAdmin={me.isAdmin}
           onRequireLogin={() => setLoginOpen(true)}
           setNotice={setNotice}
@@ -189,7 +198,8 @@ function App() {
           onClose={() => setFeedbackOpen(false)}
           onSaved={() => {
             setFeedbackOpen(false)
-            if (me.isAdmin) refreshFeedback().catch(() => {})
+            setFeedbackPage(1)
+            setFeedbackRevision(value => value + 1)
             setNotice('反馈已提交')
           }}
         />
@@ -201,16 +211,25 @@ function App() {
           onLogin={async () => {
             setLoginOpen(false)
             const currentMe = await refreshMe()
-            if (currentMe.isAdmin) await refreshFeedback()
-            setNotice('管理员已登录')
+            if (!currentMe.mustChangePassword && pendingView) {
+              await enterAssistant(pendingView)
+              setPendingView(null)
+            }
+            setNotice('已登录')
           }}
         />
       )}
+      {passwordOpen && me.authenticated && !me.builtin && <PasswordDialog required={me.mustChangePassword} onClose={me.mustChangePassword ? undefined : () => setPasswordOpen(false)} onLogout={logout} onSaved={async () => {
+        setPasswordOpen(false)
+        await refreshMe()
+        if (pendingView) { await enterAssistant(pendingView); setPendingView(null) }
+        setNotice('密码已修改')
+      }} />}
     </main>
   )
 }
 
-function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
+function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
   return (
     <>
       <AccordionSection eyebrow="Standard Interpretation" title="标准解读助手">
@@ -286,26 +305,17 @@ function HomeView({ stats, feedback, isAdmin, onOpenAssistant, onReplySaved, set
         </div>
       </AccordionSection>
 
-      <section className="homeSection">
-        <SectionHeading eyebrow="Usage Metrics" title="统计指标" />
-        <div className="metrics">
-          <MetricCard label="标准解读使用" value={stats.standardUses} icon={<BookOpenCheck size={21} />} tone="teal" />
-          <MetricCard label="PDF 转 Word 使用" value={stats.pdfUses} icon={<FileOutput size={21} />} tone="violet" />
-          <MetricCard label="制造一厂问答使用" value={stats.qaNativeUses} icon={<Bot size={21} />} tone="blue" />
-          <MetricCard label="制造四厂问答使用" value={stats.ragflowUses} icon={<Database size={21} />} tone="ragflow" />
-          <MetricCard label="翻译助手使用" value={stats.translationUses} icon={<Languages size={21} />} tone="green" />
-          <MetricCard label="今日活跃访问" value={stats.active.day} icon={<Activity size={21} />} tone="amber" />
-        </div>
-      </section>
+      <UsageStatistics api={api} setNotice={setNotice} refreshKey={statsRevision} />
 
-      {isAdmin && (
         <FeedbackBoard
-          items={feedback}
+          items={feedback.items}
+          page={feedbackPage}
+          pagination={feedback}
+          onPage={onFeedbackPage}
           isAdmin={isAdmin}
           onReplySaved={onReplySaved}
           setNotice={setNotice}
         />
-      )}
     </>
   )
 }
@@ -326,28 +336,8 @@ function AccordionSection({ eyebrow, title, children }) {
   )
 }
 
-function SectionHeading({ eyebrow, title }) {
-  return (
-    <div className="sectionTitle homeSectionTitle">
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h2>{title}</h2>
-      </div>
-    </div>
-  )
-}
-
-function MetricCard({ label, value, icon, tone }) {
-  return (
-    <article className={`metric ${tone}`}>
-      <div className="metricIcon">{icon}</div>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  )
-}
-
-function FeedbackBoard({ items, isAdmin, onReplySaved, setNotice }) {
+function FeedbackBoard({ items, page, pagination, onPage, isAdmin, onReplySaved, setNotice }) {
+  const [open, setOpen] = useState(false)
   const [replyingId, setReplyingId] = useState(null)
   const [replyText, setReplyText] = useState('')
   const [saving, setSaving] = useState(false)
@@ -372,14 +362,8 @@ function FeedbackBoard({ items, isAdmin, onReplySaved, setNotice }) {
   }
 
   return (
-    <section className="feedbackPanel">
-      <div className="sectionTitle">
-        <div>
-          <p className="eyebrow">Feedback Loop</p>
-          <h2>问题意见</h2>
-        </div>
-        <span>{items.length} 条</span>
-      </div>
+    <section className={`feedbackPanel ${open ? '' : 'collapsed'}`}>
+      <button className="feedbackToggle" type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}><span><strong>问题意见</strong><small>{pagination.total} 条</small></span><ChevronDown className={open ? 'rotated' : ''} size={21} /></button>
 
       <div className="feedbackList">
         {items.length === 0 && <p className="empty">暂无反馈。</p>}
@@ -417,6 +401,7 @@ function FeedbackBoard({ items, isAdmin, onReplySaved, setNotice }) {
           </article>
         ))}
       </div>
+      <Pagination page={page} totalPages={pagination.totalPages || 1} total={pagination.total} pageSize={3} onChange={onPage} />
     </section>
   )
 }
@@ -1128,7 +1113,11 @@ function AdminCollapsibleSection({ className, sectionId, eyebrow, title, summary
   )
 }
 
-function AdminView({ isAdmin, onRequireLogin, setNotice }) {
+function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
+  const permissions = me.permissions || []
+  const canManageTerms = permissions.includes('glossary.manage')
+  const canManagePrompts = permissions.some(item => item.startsWith('prompts.'))
+  const canReadAudit = permissions.includes('audit.read')
   const [terms, setTerms] = useState([])
   const [prompts, setPrompts] = useState([])
   const [audit, setAudit] = useState([])
@@ -1140,9 +1129,9 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
 
   useEffect(() => {
     if (isAdmin) {
-      Promise.all([loadTerms(), loadPrompts(), loadAudit()]).catch((error) => setNotice(error.message))
+      Promise.all([canManageTerms ? loadTerms() : Promise.resolve(), canManagePrompts ? loadPrompts() : Promise.resolve(), canReadAudit ? loadAudit() : Promise.resolve()]).catch((error) => setNotice(error.message))
     }
-  }, [isAdmin, setNotice])
+  }, [isAdmin, canManageTerms, canManagePrompts, canReadAudit, setNotice])
 
   async function loadTerms() {
     const data = await api('/api/glossary-terms')
@@ -1237,7 +1226,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
 
   return (
     <section className="workspace adminWorkspace">
-      <AdminCollapsibleSection
+      {canManageTerms && <AdminCollapsibleSection
         className="glossaryManager"
         sectionId="admin-glossary"
         eyebrow="Terminology Assets"
@@ -1290,9 +1279,9 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             </article>
           ))}
         </div>
-      </AdminCollapsibleSection>
+      </AdminCollapsibleSection>}
 
-      <AdminCollapsibleSection
+      {canManagePrompts && <AdminCollapsibleSection
         className="promptSettings"
         sectionId="admin-prompts"
         eyebrow="Assistant Instructions"
@@ -1305,7 +1294,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
           {prompts.map((item, index) => (
             <article className="promptEditor" key={item.assistantId}>
               <div>
-                <strong>标准解读（{['一厂', '二厂', '三厂'][index] || index + 1}）</strong>
+                <strong>标准解读（{['一厂', '二厂', '三厂'][Number(item.assistantId.at(-1)) - 1]}）</strong>
                 {index > 0 && <span>提示词可独立配置</span>}
               </div>
               <textarea
@@ -1321,9 +1310,9 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             </article>
           ))}
         </div>
-      </AdminCollapsibleSection>
+      </AdminCollapsibleSection>}
 
-      <AdminCollapsibleSection
+      {canReadAudit && <AdminCollapsibleSection
         className="modelAudit"
         sectionId="admin-model-audit"
         eyebrow="Thinking Audit"
@@ -1354,7 +1343,7 @@ function AdminView({ isAdmin, onRequireLogin, setNotice }) {
             )
           })}
         </div>
-      </AdminCollapsibleSection>
+      </AdminCollapsibleSection>}
     </section>
   )
 }
@@ -1396,13 +1385,15 @@ function FeedbackDialog({ onClose, onSaved }) {
 }
 
 function LoginDialog({ onClose, onLogin }) {
-  const [username, setUsername] = useState('admin')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
 
   async function submit(event) {
     event.preventDefault()
     setError('')
+    setSaving(true)
     try {
       await api('/api/login', {
         method: 'POST',
@@ -1412,21 +1403,49 @@ function LoginDialog({ onClose, onLogin }) {
       await onLogin()
     } catch (loginError) {
       setError(loginError.message)
-    }
+    } finally { setSaving(false) }
   }
 
   return (
-    <Dialog title="管理员登录" onClose={onClose}>
+    <Dialog title="登录 AI助手服务台" onClose={onClose}>
       <form className="dialogForm" onSubmit={submit}>
-        <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="管理员账号" />
-        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="管理员密码" type="password" autoFocus />
+        <input required value={username} onChange={(event) => setUsername(event.target.value)} placeholder="工号 / OA 账号" autoComplete="username" autoFocus />
+        <input required value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" type="password" autoComplete="current-password" />
         {error && <p className="formError">{error}</p>}
-        <button className="primary" type="submit">
-          <ShieldCheck size={18} /> 登录
+        <button className="primary" type="submit" disabled={saving}>
+          <LogIn size={18} /> {saving ? '登录中...' : '登录'}
         </button>
       </form>
     </Dialog>
   )
+}
+
+function PasswordDialog({ required, onClose, onSaved, onLogout }) {
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  async function submit(event) {
+    event.preventDefault()
+    if (password !== confirmation) { setError('两次输入的新密码不一致'); return }
+    setSaving(true); setError('')
+    try {
+      await api('/api/account/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword, password }) })
+      await onSaved()
+    } catch (submitError) { setError(submitError.message) } finally { setSaving(false) }
+  }
+  return <Dialog title={required ? '首次登录 · 修改密码' : '修改密码'} onClose={onClose}>
+    {required && <p className="passwordRequirement">请修改初始密码后继续使用。</p>}
+    <form className="dialogForm" onSubmit={submit}>
+      <input required type="password" autoComplete="current-password" placeholder="当前密码" aria-label="当前密码" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} />
+      <input required minLength={6} maxLength={128} type="password" autoComplete="new-password" placeholder="新密码（至少 6 位）" aria-label="新密码" value={password} onChange={event => setPassword(event.target.value)} />
+      <input required type="password" autoComplete="new-password" placeholder="再次输入新密码" aria-label="再次输入新密码" value={confirmation} onChange={event => setConfirmation(event.target.value)} />
+      {error && <p className="formError">{error}</p>}
+      <button className="primary" type="submit" disabled={saving}><KeyRound size={17} />{saving ? '保存中...' : '保存新密码'}</button>
+      {required && <button className="ghost" type="button" onClick={() => onLogout().catch(logoutError => setError(logoutError.message))}><LogOut size={16} />退出登录</button>}
+    </form>
+  </Dialog>
 }
 
 function Dialog({ title, children, onClose }) {
@@ -1435,7 +1454,7 @@ function Dialog({ title, children, onClose }) {
       <section className="dialog" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialogHead">
           <h2>{title}</h2>
-          <button type="button" onClick={onClose}>关闭</button>
+          {onClose && <button type="button" title="关闭" aria-label="关闭" onClick={onClose}><X size={18} /></button>}
         </div>
         {children}
       </section>
@@ -1446,16 +1465,24 @@ function Dialog({ title, children, onClose }) {
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'include', ...options })
   const text = await response.text()
-  const data = text ? JSON.parse(text) : {}
+  let data
+  try { data = text ? JSON.parse(text) : {} } catch { throw new Error('服务返回内容异常，请检查后端是否启动或重启服务') }
   if (!response.ok) {
+    if (response.status === 401 && path !== '/api/login') window.dispatchEvent(new Event('platform-login-required'))
+    if (data.code === 'PASSWORD_CHANGE_REQUIRED') window.dispatchEvent(new Event('platform-password-required'))
     throw new Error(data.error || data.message || '请求失败')
   }
   return data
 }
 
+function createUsageRequestId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
+}
+
 function formatTime(value) {
   if (!value) return ''
   return new Date(value).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

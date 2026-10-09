@@ -13,6 +13,8 @@ dist-ssr
 *.local
 .env
 storage/*.sqlite
+storage/**/*.sqlite
+storage/**/*.sqlite.tmp
 storage/**/*.docx
 storage/**/*.pdf
 storage/glossary.md

@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { Agent } from 'undici'
 import { callSharedModel, callSharedModelStream, readModelAudit } from './model-client.js'
+import { createPlatform } from './platform.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -55,6 +56,7 @@ await ensureDirectories()
 const db = await openDatabase()
 ensureSchema()
 syncGlossaryMarkdown()
+const platform = await createPlatform({ db, saveDatabase, session })
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -78,6 +80,7 @@ app.use(
     secret: process.env.SESSION_SECRET || 'aizhushou-local-dev-secret',
     resave: false,
     saveUninitialized: false,
+    store: platform.store,
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
@@ -85,6 +88,13 @@ app.use(
     },
   }),
 )
+app.use(platform.attachUser)
+platform.registerRoutes(app)
+app.use('/api', (req, res, next) => {
+  const protectedPaths = ['/usage/', '/qa/', '/ragflow/', '/translate', '/pdf-to-word', '/standards/', '/document-tasks/', '/translations/', '/assistants/ragflow/open']
+  if (protectedPaths.some(prefix => req.path.startsWith(prefix))) return platform.requireUser(req, res, next)
+  next()
+})
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
@@ -107,35 +117,14 @@ app.get('/api/assistants/ragflow/open', (req, res) => {
     return
   }
 
-  if (req.query.count !== '0') recordEvent('ragflow_click')
+  if (req.query.count !== '0') platform.recordEvent('ragflow_click', req)
   res.set('Cache-Control', 'no-store')
   res.set('Referrer-Policy', 'no-referrer')
   res.redirect(302, target.toString())
 })
 
-app.get('/api/me', (req, res) => {
-  res.json({ isAdmin: Boolean(req.session?.isAdmin), username: req.session?.username || null })
-})
-
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body || {}
-  const expectedUser = process.env.ADMIN_USERNAME || 'admin'
-  const expectedPass = process.env.ADMIN_PASSWORD || 'change-me'
-  if (username === expectedUser && password === expectedPass) {
-    req.session.isAdmin = true
-    req.session.username = expectedUser
-    res.json({ ok: true, isAdmin: true, username: expectedUser })
-    return
-  }
-  res.status(401).json({ error: '管理员账号或密码不正确' })
-})
-
-app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }))
-})
-
-app.post('/api/visit', (_req, res) => {
-  recordEvent('visit')
+app.post('/api/visit', (req, res) => {
+  platform.recordEvent('visit', req)
   res.json({ ok: true })
 })
 
@@ -152,24 +141,24 @@ app.post('/api/usage/:assistant', (req, res) => {
     res.status(400).json({ error: '未知助手类型' })
     return
   }
-  recordEvent(eventType)
+  platform.recordEvent(eventType, req)
   res.json({ ok: true })
 })
 
-app.get('/api/stats', (_req, res) => {
-  res.json(getStats())
-})
-
-app.get('/api/feedback', requireAdmin, (_req, res) => {
+app.get('/api/feedback', (req, res) => {
+  const page = Math.max(1, Math.floor(Number(req.query.page) || 1))
+  const pageSize = 3
+  const total = get('SELECT COUNT(*) AS count FROM feedback').count
   const rows = all(
     `SELECT id, content, reply, created_at AS createdAt, replied_at AS repliedAt
      FROM feedback
-     ORDER BY datetime(created_at) DESC`,
+     ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?`,
+    [pageSize, (page - 1) * pageSize],
   )
-  res.json({ items: rows })
+  res.json({ items: rows, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) })
 })
 
-app.post('/api/feedback', (req, res) => {
+app.post('/api/feedback', platform.requireUser, (req, res) => {
   const content = String(req.body?.content || '').trim()
   if (!content) {
     res.status(400).json({ error: '反馈内容不能为空' })
@@ -183,7 +172,11 @@ app.post('/api/feedback', (req, res) => {
   res.json({ ok: true, item: get('SELECT * FROM feedback ORDER BY id DESC LIMIT 1') })
 })
 
-app.patch('/api/feedback/:id/reply', requireAdmin, (req, res) => {
+app.patch('/api/feedback/:id/reply', platform.requirePermission('feedback.reply'), (req, res) => {
+  if (!get('SELECT id FROM feedback WHERE id = ?', [req.params.id])) {
+    res.status(404).json({ error: '反馈不存在' })
+    return
+  }
   const reply = String(req.body?.reply || '').trim()
   if (!reply) {
     res.status(400).json({ error: '回复内容不能为空' })
@@ -203,11 +196,11 @@ app.get('/api/glossaries', (_req, res) => {
   res.json({ items: rows })
 })
 
-app.get('/api/glossary-terms', requireAdmin, (_req, res) => {
+app.get('/api/glossary-terms', platform.requirePermission('glossary.manage'), (_req, res) => {
   res.json({ items: getGlossaryTerms() })
 })
 
-app.post('/api/glossary-terms', requireAdmin, (req, res) => {
+app.post('/api/glossary-terms', platform.requirePermission('glossary.manage'), (req, res) => {
   const term = validateGlossaryTerm(req.body)
   run(
     `INSERT INTO glossary_terms (zh_term, en_term, note, created_at, updated_at)
@@ -218,7 +211,7 @@ app.post('/api/glossary-terms', requireAdmin, (req, res) => {
   res.status(201).json({ ok: true, item: getGlossaryTerms()[0] })
 })
 
-app.patch('/api/glossary-terms/:id', requireAdmin, (req, res) => {
+app.patch('/api/glossary-terms/:id', platform.requirePermission('glossary.manage'), (req, res) => {
   const existing = get('SELECT id FROM glossary_terms WHERE id = ?', [req.params.id])
   if (!existing) {
     res.status(404).json({ error: '未找到该词库条目' })
@@ -233,7 +226,7 @@ app.patch('/api/glossary-terms/:id', requireAdmin, (req, res) => {
   res.json({ ok: true })
 })
 
-app.delete('/api/glossary-terms/:id', requireAdmin, (req, res) => {
+app.delete('/api/glossary-terms/:id', platform.requirePermission('glossary.manage'), (req, res) => {
   const existing = get('SELECT id FROM glossary_terms WHERE id = ?', [req.params.id])
   if (!existing) {
     res.status(404).json({ error: '未找到该词库条目' })
@@ -244,19 +237,23 @@ app.delete('/api/glossary-terms/:id', requireAdmin, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/admin/prompts', requireAdmin, (_req, res) => {
+app.get('/api/admin/prompts', platform.requireUser, (req, res) => {
+  const rows = all('SELECT assistant_id AS assistantId, prompt, updated_at AS updatedAt FROM assistant_prompts ORDER BY assistant_id')
+    .filter(item => req.user.permissions.includes(`prompts.${item.assistantId.at(-1)}`))
+  if (!rows.length) { res.status(403).json({ error: '没有提示词管理权限' }); return }
   res.json({
-    items: all(
-      `SELECT assistant_id AS assistantId, prompt, updated_at AS updatedAt
-       FROM assistant_prompts ORDER BY assistant_id`,
-    ),
+    items: rows,
   })
 })
 
-app.put('/api/admin/prompts/:assistantId', requireAdmin, (req, res) => {
+app.put('/api/admin/prompts/:assistantId', platform.requireUser, (req, res) => {
   const assistantId = String(req.params.assistantId || '')
   if (!['standard-plant-1', 'standard-plant-2', 'standard-plant-3'].includes(assistantId)) {
     res.status(404).json({ error: '未找到该标准解读助手' })
+    return
+  }
+  if (!req.user.permissions.includes(`prompts.${assistantId.at(-1)}`)) {
+    res.status(403).json({ error: '没有该厂提示词的管理权限' })
     return
   }
   const prompt = String(req.body?.prompt || '').trim()
@@ -276,7 +273,7 @@ app.put('/api/admin/prompts/:assistantId', requireAdmin, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/admin/model-audit', requireAdmin, async (req, res, next) => {
+app.get('/api/admin/model-audit', platform.requirePermission('audit.read'), async (req, res, next) => {
   try {
     res.json({ items: await readModelAudit(req.query.limit) })
   } catch (error) {
@@ -284,7 +281,7 @@ app.get('/api/admin/model-audit', requireAdmin, async (req, res, next) => {
   }
 })
 
-app.post('/api/glossaries', requireAdmin, upload.single('file'), async (req, res, next) => {
+app.post('/api/glossaries', platform.requirePermission('glossary.manage'), upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
       res.status(400).json({ error: '请选择要上传的词库文件' })
@@ -334,7 +331,7 @@ app.post('/api/qa/chat', async (req, res, next) => {
       return
     }
 
-    const account = resolveQaAccount(req.body)
+    const account = req.user.builtin ? resolveQaAccount(req.body) : req.user.username
     if (!account) {
       res.status(400).json({ error: '未获取到 OA 账号，请从 OA 入口访问本系统，或在 .env 中配置 QA_DEFAULT_ACCOUNT 用于测试' })
       return
@@ -386,7 +383,7 @@ app.post('/api/qa/chat/stream', async (req, res, next) => {
       return
     }
 
-    const qaRequest = await buildQaChatRequest(req.body, messages)
+    const qaRequest = await buildQaChatRequest(req.body, messages, req.user)
     const response = await fetch(qaRequest.url, qaRequest.options)
 
     if (!response.ok) {
@@ -566,8 +563,8 @@ app.post('/api/translate', upload.single('file'), async (req, res, next) => {
     run(
       `INSERT INTO translations
         (original_name, stored_name, converted_name, result_name, direction,
-         original_html, translated_html, glossary_names, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         original_html, translated_html, glossary_names, created_at, owner_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.file.originalname,
         req.file.filename,
@@ -578,6 +575,7 @@ app.post('/api/translate', upload.single('file'), async (req, res, next) => {
         translatedHtml,
         JSON.stringify(glossaries.map((item) => item.originalName)),
         now(),
+        req.user.id,
       ],
     )
     const id = get('SELECT id FROM translations ORDER BY id DESC LIMIT 1').id
@@ -657,6 +655,7 @@ app.post('/api/translate/document', upload.single('file'), async (req, res, next
       storedName: req.file.filename,
       stage: '文件已上传，等待翻译',
       metadata: { direction },
+      ownerId: req.user.id,
     })
     setImmediate(() => {
       processTranslationDocumentTask(task.id).catch((error) => failDocumentTask(task.id, error))
@@ -680,6 +679,7 @@ app.post('/api/pdf-to-word', upload.single('file'), async (req, res, next) => {
     }
     const task = createDocumentTask({
       type: 'pdf-to-word',
+      ownerId: req.user.id,
       originalName: req.file.originalname,
       storedName: req.file.filename,
       stage: '文件已上传，等待处理',
@@ -732,6 +732,7 @@ app.post('/api/standards/:plantId', upload.single('file'), async (req, res, next
       storedName: req.file.filename,
       stage: '文件已上传，等待解读',
       metadata: { grade },
+      ownerId: req.user.id,
     })
     setImmediate(() => {
       processStandardTask(task.id, assistantId).catch((error) => failDocumentTask(task.id, error))
@@ -744,7 +745,7 @@ app.post('/api/standards/:plantId', upload.single('file'), async (req, res, next
 
 app.get('/api/document-tasks/:id', (req, res) => {
   const task = getDocumentTask(req.params.id)
-  if (!task) {
+  if (!task || !canReadDocumentTask(req.params.id, req.user)) {
     res.status(404).json({ error: '未找到该处理任务' })
     return
   }
@@ -753,7 +754,7 @@ app.get('/api/document-tasks/:id', (req, res) => {
 
 app.get('/api/document-tasks/:id/download', (req, res, next) => {
   const task = getDocumentTask(req.params.id)
-  if (!task || task.status !== 'completed' || !task.resultName) {
+  if (!task || !canReadDocumentTask(req.params.id, req.user) || task.status !== 'completed' || !task.resultName) {
     res.status(404).json({ error: '结果文件尚未生成' })
     return
   }
@@ -773,10 +774,10 @@ app.get('/api/document-tasks/:id/download', (req, res, next) => {
 })
 
 app.get('/api/translations/:id/download', (req, res, next) => {
-  const row = get('SELECT result_name AS resultName, original_name AS originalName FROM translations WHERE id = ?', [
+  const row = get('SELECT result_name AS resultName, original_name AS originalName, owner_id AS ownerId FROM translations WHERE id = ?', [
     req.params.id,
   ])
-  if (!row) {
+  if (!row || (!req.user.isSuperAdmin && row.ownerId !== req.user.id)) {
     res.status(404).json({ error: '未找到翻译结果' })
     return
   }
@@ -789,6 +790,7 @@ app.get('/api/translations/:id/download', (req, res, next) => {
 })
 
 const distDir = path.join(rootDir, 'dist')
+app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在' }))
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir))
   app.get(/.*/, (_req, res) => {
@@ -804,6 +806,7 @@ app.use((error, _req, res, _next) => {
 })
 
 app.listen(port, '0.0.0.0', () => {
+  platform.startSchedules()
   console.log(`AI助手网页服务已启动: http://localhost:${port}`)
 })
 
@@ -820,7 +823,13 @@ async function openDatabase() {
     locateFile: (file) => path.join(rootDir, 'node_modules', 'sql.js', 'dist', file),
   })
   if (fs.existsSync(dbPath)) {
-    return new SQL.Database(await fsp.readFile(dbPath))
+    const loaded = new SQL.Database(await fsp.readFile(dbPath))
+    if (!loaded.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").length) {
+      const backupDir = path.join(storageDir, 'backups')
+      await fsp.mkdir(backupDir, { recursive: true })
+      await fsp.copyFile(dbPath, path.join(backupDir, `aizhushou-before-accounts-${Date.now()}.sqlite`))
+    }
+    return loaded
   }
   return new SQL.Database()
 }
@@ -930,7 +939,9 @@ function get(sql, params = []) {
 }
 
 function saveDatabase() {
-  fs.writeFileSync(dbPath, Buffer.from(db.export()))
+  const temporaryPath = `${dbPath}.tmp`
+  fs.writeFileSync(temporaryPath, Buffer.from(db.export()))
+  fs.renameSync(temporaryPath, dbPath)
 }
 
 function now() {
@@ -976,53 +987,6 @@ function syncGlossaryMarkdown() {
 
 function escapeMarkdownCell(value) {
   return String(value || '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>')
-}
-
-function recordEvent(type) {
-  run('INSERT INTO events (type, created_at) VALUES (?, ?)', [type, now()])
-}
-
-function getStats() {
-  const events = all('SELECT type, created_at AS createdAt FROM events')
-  const today = new Date()
-  const visits = events.filter((event) => event.type === 'visit')
-  const qaNativeUses = events.filter((event) => event.type === 'qa_click').length
-  const ragflowUses = events.filter((event) => event.type === 'ragflow_click').length
-  return {
-    qaNativeUses,
-    ragflowUses,
-    translationUses: events.filter((event) => event.type === 'translation_click').length,
-    pdfUses: events.filter((event) => event.type === 'pdf_click').length,
-    standardUses: events.filter((event) => event.type === 'standard_click').length,
-    active: {
-      day: visits.filter((event) => isSameDay(event.createdAt, today)).length,
-      month: visits.filter((event) => isSameMonth(event.createdAt, today)).length,
-      year: visits.filter((event) => isSameYear(event.createdAt, today)).length,
-    },
-  }
-}
-
-function isSameDay(value, target) {
-  const date = new Date(value)
-  return date.getFullYear() === target.getFullYear() && date.getMonth() === target.getMonth() && date.getDate() === target.getDate()
-}
-
-function isSameMonth(value, target) {
-  const date = new Date(value)
-  return date.getFullYear() === target.getFullYear() && date.getMonth() === target.getMonth()
-}
-
-function isSameYear(value, target) {
-  const date = new Date(value)
-  return date.getFullYear() === target.getFullYear()
-}
-
-function requireAdmin(req, res, next) {
-  if (!req.session?.isAdmin) {
-    res.status(401).json({ error: '请先以管理员身份登录' })
-    return
-  }
-  next()
 }
 
 function normalizeMessages(body) {
@@ -1115,13 +1079,13 @@ function qaFetchOptions() {
   return insecureQaDispatcher ? { dispatcher: insecureQaDispatcher } : {}
 }
 
-async function buildQaChatRequest(body, messages) {
+async function buildQaChatRequest(body, messages, user) {
   const baseUrl = normalizeBaseUrl(process.env.QA_API_BASE_URL)
   if (!baseUrl) {
     throw new Error('请先在 .env 中配置 QA_API_BASE_URL')
   }
 
-  const account = resolveQaAccount(body)
+  const account = user?.builtin ? resolveQaAccount(body) : user?.username
   if (!account) {
     throw new Error('未获取到 OA 账号，请从 OA 入口访问本系统，或在 .env 中配置 QA_DEFAULT_ACCOUNT 用于测试')
   }
@@ -1829,16 +1793,21 @@ function splitLongBlock(value, maxLength) {
   return parts
 }
 
-function createDocumentTask({ type, originalName, storedName, stage, metadata = {} }) {
+function createDocumentTask({ type, originalName, storedName, stage, metadata = {}, ownerId }) {
   const id = crypto.randomUUID()
   const timestamp = now()
   run(
     `INSERT INTO document_tasks
-      (id, type, status, progress, stage, original_name, stored_name, metadata_json, created_at, updated_at)
-     VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)`,
-    [id, type, stage, originalName, storedName, JSON.stringify(metadata), timestamp, timestamp],
+      (id, type, status, progress, stage, original_name, stored_name, metadata_json, created_at, updated_at, owner_id)
+     VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, type, stage, originalName, storedName, JSON.stringify(metadata), timestamp, timestamp, ownerId],
   )
   return getDocumentTask(id)
+}
+
+function canReadDocumentTask(id, user) {
+  const row = get('SELECT owner_id FROM document_tasks WHERE id = ?', [id])
+  return row && (user.isSuperAdmin || row.owner_id === user.id)
 }
 
 function getDocumentTask(id) {
