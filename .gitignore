@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 .env
+.env.*
+!.env.example
 storage/*.sqlite
 storage/**/*.sqlite
 storage/**/*.sqlite.tmp
