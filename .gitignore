@@ -20,6 +20,8 @@ storage/**/*.sqlite.tmp
 storage/**/*.docx
 storage/**/*.pdf
 storage/glossary.md
+storage/glossaries/*.md
+resources/standards/*.pdf
 storage/mdm-snapshots/
 
 # Editor directories and files

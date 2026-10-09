@@ -1,0 +1,90 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import initSqlJs from 'sql.js'
+import {createGlossaryStore,glossaryLibrary} from '../server/glossary.js'
+
+const SQL=await initSqlJs()
+test('Four-library migration preserves legacy terms, IDs, notes, duplicates and timestamps',async(t)=>{
+  const storageDir=await fs.mkdtemp(path.join(os.tmpdir(),'aizhushou-glossary-'))
+  t.after(()=>fs.rm(storageDir,{recursive:true,force:true}))
+  const db=new SQL.Database();t.after(()=>db.close())
+  db.run(`CREATE TABLE glossary_terms(id INTEGER PRIMARY KEY AUTOINCREMENT,zh_term TEXT NOT NULL,en_term TEXT NOT NULL,note TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    INSERT INTO glossary_terms VALUES (17,'牌号','designation','旧备注','2020-01-01','2021-01-02'),(29,'牌号','grade','旧重复也保留','2022-01-01','2023-01-02');`)
+  let saves=0
+  const store=createGlossaryStore({db,saveDatabase:()=>saves++,storageDir})
+  assert.equal(store.catalog().length,4)
+  assert.deepEqual(store.catalog().map(item=>item.count),[2,0,0,0])
+  assert.equal(store.terms()[0].id,17)
+  assert.equal(store.terms()[0].note,'旧备注')
+  assert.equal(store.terms()[0].createdAt,'2020-01-01')
+  assert.equal(store.terms()[1].updatedAt,'2023-01-02')
+  assert.equal(store.list().items.every(item=>item.duplicate),true)
+  assert.equal((await fs.readdir(path.join(storageDir,'backups'))).length,1)
+  assert.ok(saves>0)
+  createGlossaryStore({db,saveDatabase:()=>{},storageDir})
+  assert.equal((await fs.readdir(path.join(storageDir,'backups'))).length,1)
+  assert.equal(glossaryLibrary(undefined).id,'general')
+  assert.throws(()=>glossaryLibrary('unknown'))
+})
+
+test('Duplicates warn, show complete pairs, allow explicit override, and remain scoped to one library',async(t)=>{
+  const storageDir=await fs.mkdtemp(path.join(os.tmpdir(),'aizhushou-glossary-'))
+  t.after(()=>fs.rm(storageDir,{recursive:true,force:true}))
+  const db=new SQL.Database();t.after(()=>db.close())
+  db.run('CREATE TABLE glossary_terms(id INTEGER PRIMARY KEY AUTOINCREMENT,zh_term TEXT,en_term TEXT,note TEXT,created_at TEXT,updated_at TEXT)')
+  const store=createGlossaryStore({db,saveDatabase:()=>{},storageDir})
+  const create=(libraryId,items,allowDuplicates=false)=>store.mutate({action:'create',libraryId,items,allowDuplicates})
+  const first=create('general',[{zhTerm:'牌号',enTerm:'designation'}]).items[0]
+  const chinese=create('general',[{zhTerm:' 牌号 ',enTerm:'alternative grade'}])
+  assert.equal(chinese.requiresConfirmation,true)
+  assert.equal(chinese.conflicts[0].existing.zhTerm,'牌号')
+  assert.equal(chinese.conflicts[0].existing.enTerm,'designation')
+  assert.equal(store.terms().length,1)
+  assert.equal(create('general',[{zhTerm:'牌号',enTerm:'alternative grade'}],true).ok,true)
+  assert.equal(store.terms()[0].enTerm,'designation')
+  const english=create('general',[{zhTerm:'另一个中文',enTerm:' DESIGNATION '}])
+  assert.equal(english.conflicts[0].enDuplicate,true)
+  assert.equal(english.conflicts[0].zhDuplicate,false)
+  assert.equal(create('finished',[{zhTerm:'牌号',enTerm:'designation'}]).ok,true)
+  const self=store.mutate({action:'update',libraryId:'finished',items:[{...store.terms('finished')[0],note:'仅改备注'}]})
+  assert.equal(self.ok,true)
+  assert.throws(()=>store.mutate({action:'update',libraryId:'general',items:[{...first,expectedUpdatedAt:'stale'}]}),error=>error.status===409)
+  assert.equal(store.list({q:'DESIGNATION'}).total,1)
+  assert.equal(store.list({q:'仅改备注',libraryId:'finished'}).total,1)
+  const frozen=store.snapshot('finished')
+  store.mutate({action:'update',libraryId:'finished',items:[{...self.items[0],enTerm:'changed reference'}]})
+  assert.ok(frozen.markdown.includes('designation'))
+  assert.ok(!frozen.markdown.includes('changed reference'))
+  const mirrored=await fs.readFile(path.join(storageDir,'glossaries','finished.md'),'utf8')
+  assert.ok(mirrored.includes('changed reference'))
+  assert.ok(!(await fs.readFile(path.join(storageDir,'glossary.md'),'utf8')).includes('changed reference'))
+})
+
+test('Batch operations validate all rows before writes, check final edited values and enforce category ownership',async(t)=>{
+  const storageDir=await fs.mkdtemp(path.join(os.tmpdir(),'aizhushou-glossary-'))
+  t.after(()=>fs.rm(storageDir,{recursive:true,force:true}))
+  const db=new SQL.Database();t.after(()=>db.close())
+  db.run('CREATE TABLE glossary_terms(id INTEGER PRIMARY KEY AUTOINCREMENT,zh_term TEXT,en_term TEXT,note TEXT,created_at TEXT,updated_at TEXT)')
+  const store=createGlossaryStore({db,saveDatabase:()=>{},storageDir})
+  const rows=[{zhTerm:'试样甲',enTerm:'sample A'},{zhTerm:'试样乙',enTerm:'sample B'}]
+  assert.throws(()=>store.mutate({action:'create',libraryId:'testing',items:[rows[0],{zhTerm:'',enTerm:'bad'}]}))
+  assert.equal(store.terms('testing').length,0)
+  const created=store.mutate({action:'create',libraryId:'testing',items:rows}).items
+  const swapped=store.mutate({action:'update',libraryId:'testing',items:[{...created[0],enTerm:'sample B'},{...created[1],enTerm:'sample A'}]})
+  assert.equal(swapped.ok,true)
+  const duplicates=store.mutate({action:'update',libraryId:'testing',items:swapped.items.map(item=>({...item,enTerm:'same sample'}))})
+  assert.equal(duplicates.requiresConfirmation,true)
+  assert.equal(duplicates.conflicts[0].inBatch,true)
+  assert.equal(store.terms('testing')[0].enTerm,'sample B')
+  assert.equal(store.mutate({action:'update',libraryId:'testing',items:swapped.items.map(item=>({...item,enTerm:'same sample'})),allowDuplicates:true}).ok,true)
+  assert.throws(()=>store.mutate({action:'delete',libraryId:'processing',ids:created.map(item=>item.id)}))
+  assert.equal(store.terms('testing').length,2)
+  assert.equal(store.mutate({action:'delete',libraryId:'testing',ids:created.map(item=>item.id)}).count,2)
+  assert.equal(store.terms('testing').length,0)
+  const internal=store.mutate({action:'create',libraryId:'processing',items:[{zhTerm:'配料',enTerm:'blending'},{zhTerm:'另一配料',enTerm:'BLENDING'}]})
+  assert.equal(internal.requiresConfirmation,true)
+  assert.equal(store.terms('processing').length,0)
+})

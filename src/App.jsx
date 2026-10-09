@@ -20,8 +20,6 @@ import {
   LogIn,
   LogOut,
   MessageSquare,
-  Pencil,
-  Plus,
   Quote,
   RefreshCw,
   Reply,
@@ -31,11 +29,12 @@ import {
   Settings2,
   ShieldCheck,
   Square,
-  Trash2,
   X,
 } from 'lucide-react'
 import './App.css'
 import { Pagination, PermissionsCenter, UsageStatistics } from './PlatformViews.jsx'
+import GlossaryManager from './GlossaryManager.jsx'
+import {glossaryOptions} from './glossary-options.js'
 
 const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: false, permissions: [], roles: [] }
 const assistantUsageTypes = { qa: 'qa', ragflow: 'ragflow', translate: 'translation', pdf: 'pdf', standard1: 'standard', standard2: 'standard', standard3: 'standard' }
@@ -774,7 +773,14 @@ function TranslateView({ setNotice }) {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [libraryId,setLibraryId]=useState('general')
+  const [libraries,setLibraries]=useState(glossaryOptions)
+  const [libraryReady,setLibraryReady]=useState(false)
+  const [documentBusy,setDocumentBusy]=useState(false)
   const chatRailRef = useRef(null)
+  useEffect(()=>{const controller=new AbortController();api('/api/glossary-libraries',{signal:controller.signal}).then(data=>{setLibraries(data.items);setLibraryReady(true)}).catch(error=>{if(!controller.signal.aborted)setNotice(error.message)});return()=>controller.abort()},[setNotice])
+  const processing=loading||documentBusy
+  const selectedLibrary=libraries.find(item=>item.id===libraryId)
 
   useEffect(() => {
     const rail = chatRailRef.current
@@ -785,7 +791,7 @@ function TranslateView({ setNotice }) {
   async function sendText(event) {
     event.preventDefault()
     const text = input.trim()
-    if (!text || loading) return
+    if (!text || loading||!libraryReady) return
     const assistantIndex = messages.length + 1
     setMessages((current) => [
       ...current,
@@ -799,7 +805,7 @@ function TranslateView({ setNotice }) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, direction }),
+        body: JSON.stringify({ text, direction,libraryId }),
       })
       if (!response.ok) {
         const errorText = await response.text()
@@ -827,7 +833,6 @@ function TranslateView({ setNotice }) {
             streaming: false,
             progress: 100,
             stage: '翻译完成',
-            glossaryCount: eventData.glossaryCount || 0,
           }))
         }
         if (eventData.type === 'error') throw new Error(eventData.error || '翻译助手调用失败')
@@ -854,16 +859,20 @@ function TranslateView({ setNotice }) {
         </div>
         <div className="translationControls">
           <div className="modeTabs" aria-label="翻译方式">
-            <button type="button" className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}>
+            <button type="button" disabled={processing} className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}>
               <MessageSquare size={16} /> 对话翻译
             </button>
-            <button type="button" className={mode === 'document' ? 'active' : ''} onClick={() => setMode('document')}>
+            <button type="button" disabled={processing} className={mode === 'document' ? 'active' : ''} onClick={() => setMode('document')}>
               <FileText size={16} /> Word 文件
             </button>
           </div>
-          <DirectionControl direction={direction} setDirection={setDirection} disabled={loading} />
+          <DirectionControl direction={direction} setDirection={setDirection} disabled={processing} />
         </div>
       </div>
+
+      <div className="translationLibraryBar"><BookOpenCheck size={17}/><label>术语库<select aria-label="术语库" value={libraryId} disabled={!libraryReady||processing} onChange={event=>setLibraryId(event.target.value)}>{libraries.map(item=><option value={item.id} key={item.id}>{item.name}</option>)}</select></label></div>
+      <div className="translationTermSource"><FileText size={16}/><span>所用术语均来源于WST标准体系文件：《与产品相关的术语集（SS020101）》。</span><a href="/api/translation/terminology-source.pdf" target="_blank" rel="noopener noreferrer" onClick={event=>{event.preventDefault();window.open(event.currentTarget.href,'_blank','noopener,noreferrer,width=1200,height=900')}}>点击查看<ExternalLink size={14}/></a></div>
+      {selectedLibrary?.hasTerms===false&&<p className="translationLibraryEmpty">当前术语库暂无条目，本次将不使用术语参考。</p>}
 
       {mode === 'chat' ? (
         <div className="translationChat">
@@ -881,9 +890,6 @@ function TranslateView({ setNotice }) {
                   {message.content || (message.streaming ? '正在处理...' : '')}
                   {message.streaming && <i className="streamCursor" />}
                 </pre>
-                {message.glossaryCount !== undefined && (
-                  <small className="glossaryUsage">本次校订使用 {message.glossaryCount} 条术语</small>
-                )}
               </div>
             ))}
           </div>
@@ -897,7 +903,7 @@ function TranslateView({ setNotice }) {
               placeholder="输入需要翻译的文字"
               rows={4}
             />
-            <button className="primary" type="submit" disabled={loading || !input.trim()}>
+            <button className="primary" type="submit" disabled={loading || !input.trim()||!libraryReady}>
               <Send size={18} /> {loading ? '处理中...' : '发送翻译'}
             </button>
           </form>
@@ -915,7 +921,9 @@ function TranslateView({ setNotice }) {
             icon={<Languages size={30} />}
             resultTitle="Markdown 翻译结果"
             setNotice={setNotice}
-            extraFields={{ direction }}
+            extraFields={{ direction,libraryId }}
+            onProcessingChange={setDocumentBusy}
+            blocked={!libraryReady}
             embedded
           />
         </div>
@@ -1004,12 +1012,16 @@ function DocumentTaskView({
   extraFields = {},
   formControl = null,
   embedded = false,
+  onProcessingChange,
+  blocked=false,
 }) {
   const [file, setFile] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [task, setTask] = useState(null)
 
-  const processing = task && ['queued', 'processing'].includes(task.status)
+  const processing = Boolean(task && ['queued', 'processing'].includes(task.status))
+  useEffect(()=>{onProcessingChange?.(submitting||processing)},[onProcessingChange,submitting,processing])
+  useEffect(()=>()=>onProcessingChange?.(false),[onProcessingChange])
 
   useEffect(() => {
     if (!task?.id || !processing) return undefined
@@ -1035,6 +1047,7 @@ function DocumentTaskView({
 
   async function submit(event) {
     event.preventDefault()
+    if(blocked||submitting||processing)return
     if (!file) {
       setNotice(emptyLabel)
       return
@@ -1072,10 +1085,10 @@ function DocumentTaskView({
           {icon}
           <strong>{file ? file.name : emptyLabel}</strong>
           <span>{fileHint}</span>
-          <input type="file" accept={accept} onChange={(event) => setFile(event.target.files?.[0] || null)} />
+          <input type="file" accept={accept} disabled={submitting||processing||blocked} onChange={(event) => setFile(event.target.files?.[0] || null)} />
         </label>
         {formControl}
-        <button className="primary" type="submit" disabled={submitting || processing}>
+        <button className="primary" type="submit" disabled={submitting || processing||blocked}>
           <FileOutput size={18} /> {submitting || processing ? `${workingLabel}...` : actionLabel}
         </button>
       </form>
@@ -1155,25 +1168,17 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
   const canManageTerms = permissions.includes('glossary.manage')
   const canManagePrompts = permissions.some(item => item.startsWith('prompts.'))
   const canReadAudit = permissions.includes('audit.read')
-  const [terms, setTerms] = useState([])
+  const [termCount,setTermCount]=useState(0)
   const [prompts, setPrompts] = useState([])
   const [audit, setAudit] = useState([])
-  const [termForm, setTermForm] = useState({ zhTerm: '', enTerm: '', note: '' })
-  const [editingTermId, setEditingTermId] = useState(null)
-  const [savingTerm, setSavingTerm] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState('')
   const [expandedSections, setExpandedSections] = useState({ glossary: false, prompts: false, audit: false })
 
   useEffect(() => {
     if (isAdmin) {
-      Promise.all([canManageTerms ? loadTerms() : Promise.resolve(), canManagePrompts ? loadPrompts() : Promise.resolve(), canReadAudit ? loadAudit() : Promise.resolve()]).catch((error) => setNotice(error.message))
+      Promise.all([canManagePrompts ? loadPrompts() : Promise.resolve(), canReadAudit ? loadAudit() : Promise.resolve()]).catch((error) => setNotice(error.message))
     }
   }, [isAdmin, canManageTerms, canManagePrompts, canReadAudit, setNotice])
-
-  async function loadTerms() {
-    const data = await api('/api/glossary-terms')
-    setTerms(data.items || [])
-  }
 
   async function loadPrompts() {
     const data = await api('/api/admin/prompts')
@@ -1202,50 +1207,8 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
     }
   }
 
-  async function saveTerm(event) {
-    event.preventDefault()
-    setSavingTerm(true)
-    try {
-      await api(editingTermId ? `/api/glossary-terms/${editingTermId}` : '/api/glossary-terms', {
-        method: editingTermId ? 'PATCH' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(termForm),
-      })
-      setTermForm({ zhTerm: '', enTerm: '', note: '' })
-      setEditingTermId(null)
-      await loadTerms()
-      setNotice(editingTermId ? '词库条目已更新' : '词库条目已新增')
-    } catch (error) {
-      setNotice(error.message)
-    } finally {
-      setSavingTerm(false)
-    }
-  }
-
-  function editTerm(item) {
-    setEditingTermId(item.id)
-    setTermForm({ zhTerm: item.zhTerm, enTerm: item.enTerm, note: item.note || '' })
-  }
-
-  function cancelTermEdit() {
-    setEditingTermId(null)
-    setTermForm({ zhTerm: '', enTerm: '', note: '' })
-  }
-
   function toggleSection(section) {
     setExpandedSections((current) => ({ ...current, [section]: !current[section] }))
-  }
-
-  async function deleteTerm(item) {
-    if (!window.confirm(`确定删除术语“${item.zhTerm} / ${item.enTerm}”吗？`)) return
-    try {
-      await api(`/api/glossary-terms/${item.id}`, { method: 'DELETE' })
-      if (editingTermId === item.id) cancelTermEdit()
-      await loadTerms()
-      setNotice('词库条目已删除')
-    } catch (error) {
-      setNotice(error.message)
-    }
   }
 
   if (!isAdmin) {
@@ -1268,54 +1231,11 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
         sectionId="admin-glossary"
         eyebrow="Terminology Assets"
         title="翻译术语词库"
-        summary={`${terms.length} 条`}
+        summary={`${termCount} 条 · 4 类`}
         open={expandedSections.glossary}
         onToggle={() => toggleSection('glossary')}
       >
-        <p className="glossaryHelp">每条术语会自动同步到后台 Markdown 词库，供翻译助手在直译后进行校订与润色。</p>
-        <form className="termEditor" onSubmit={saveTerm}>
-          <label>
-            <span>中文术语</span>
-            <input required maxLength={200} value={termForm.zhTerm} onChange={(event) => setTermForm((current) => ({ ...current, zhTerm: event.target.value }))} placeholder="例如：熔炼工序" />
-          </label>
-          <label>
-            <span>英文术语</span>
-            <input required maxLength={200} value={termForm.enTerm} onChange={(event) => setTermForm((current) => ({ ...current, enTerm: event.target.value }))} placeholder="例如：melting process" />
-          </label>
-          <label className="termNoteField">
-            <span>说明（可选）</span>
-            <input maxLength={500} value={termForm.note} onChange={(event) => setTermForm((current) => ({ ...current, note: event.target.value }))} placeholder="适用场景、缩写或使用要求" />
-          </label>
-          <div className="termFormActions">
-            <button className="primary" type="submit" disabled={savingTerm}>
-              {editingTermId ? <Save size={17} /> : <Plus size={17} />}
-              {savingTerm ? '保存中...' : editingTermId ? '保存修改' : '新增术语'}
-            </button>
-            {editingTermId && (
-              <button className="ghost" type="button" onClick={cancelTermEdit}>
-                <X size={17} /> 取消
-              </button>
-            )}
-          </div>
-        </form>
-
-        <div className="glossaryList">
-          {terms.length === 0 && <p className="empty">暂无词库条目，请先新增一条术语。</p>}
-          {terms.map((item) => (
-            <article className={`glossaryItem termItem ${editingTermId === item.id ? 'editing' : ''}`} key={item.id}>
-              <div className="termPair">
-                <strong>{item.zhTerm}</strong>
-                <span>{item.enTerm}</span>
-              </div>
-              <p>{item.note || '无补充说明'}</p>
-              <time>{formatTime(item.updatedAt)}</time>
-              <div className="termActions">
-                <button className="iconButton" type="button" title="编辑术语" aria-label={`编辑 ${item.zhTerm}`} onClick={() => editTerm(item)}><Pencil size={17} /></button>
-                <button className="iconButton danger" type="button" title="删除术语" aria-label={`删除 ${item.zhTerm}`} onClick={() => deleteTerm(item)}><Trash2 size={17} /></button>
-              </div>
-            </article>
-          ))}
-        </div>
+        <GlossaryManager api={api} setNotice={setNotice} onCountChange={setTermCount}/>
       </AdminCollapsibleSection>}
 
       {canManagePrompts && <AdminCollapsibleSection
