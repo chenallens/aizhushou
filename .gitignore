@@ -18,6 +18,7 @@ storage/**/*.sqlite.tmp
 storage/**/*.docx
 storage/**/*.pdf
 storage/glossary.md
+storage/mdm-snapshots/
 
 # Editor directories and files
 .vscode/*

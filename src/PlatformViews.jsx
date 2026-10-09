@@ -93,13 +93,15 @@ function RoleBadges({user}) {return <div className="roleBadges">{user.roles.leng
 
 function SyncDiagnostics({record}) {
   const diagnostics=record?.counts?.diagnostics
-  if (!diagnostics) return null
+  const snapshot=record?.counts?.snapshot
+  if (!diagnostics&&!snapshot) return null
   const fields={employeeId:'人员编号',code:'工号',name:'姓名',deptTopId:'一级部门',deptId:'所属部门',parentDeptId:'上级部门'}
   return <div className="syncDiagnostics">
-    <p>接口记录 {number(diagnostics.sourceRecords)} 条 · 可用人员 {number(diagnostics.acceptedRecords)} 人 · 合并重复 {number(diagnostics.duplicateRecords)} 条 · 跳过异常 {number(diagnostics.skippedRecords)} 条</p>
-    {(diagnostics.skippedRecords>0||diagnostics.nameFallbacks>0)&&<p>缺人员编号 {number(diagnostics.missingEmployeeId)} 条 · 缺工号 {number(diagnostics.missingAccount)} 条 · 姓名兜底 {number(diagnostics.nameFallbacks)} 人 · 工号冲突 {number(diagnostics.conflictingAccounts)} 组 · 人员编号冲突 {number(diagnostics.conflictingEmployeeIds)} 组</p>}
+    {diagnostics&&<p>接口记录 {number(diagnostics.sourceRecords)} 条 · 可用人员 {number(diagnostics.acceptedRecords)} 人 · 合并重复 {number(diagnostics.duplicateRecords)} 条 · 跳过异常 {number(diagnostics.skippedRecords)} 条</p>}
+    {(diagnostics?.skippedRecords>0||diagnostics?.nameFallbacks>0)&&<p>缺人员编号 {number(diagnostics.missingEmployeeId)} 条 · 缺工号 {number(diagnostics.missingAccount)} 条 · 姓名兜底 {number(diagnostics.nameFallbacks)} 人 · 工号冲突 {number(diagnostics.conflictingAccounts)} 组 · 人员编号冲突 {number(diagnostics.conflictingEmployeeIds)} 组</p>}
     {record.counts.deactivationDeferred&&<p className="syncWarning">本次含异常记录，保留原账户与部门，暂不自动停用。</p>}
-    {diagnostics.issues?.length>0&&<details><summary><History size={15}/>异常明细（{diagnostics.issues.length} 个示例）</summary>
+    {snapshot&&<p className="snapshotLocation"><span>{snapshot.captureStatus==='complete'?'原始接口数据已保存':'原始接口数据保存位置'}</span><code>{snapshot.directory}</code></p>}
+    {diagnostics?.issues?.length>0&&<details><summary><History size={15}/>异常明细（{diagnostics.issues.length} 个示例）</summary>
       <div className="platformTableViewport"><table className="platformTable"><thead><tr><th>记录位置</th><th>字段</th><th>问题</th></tr></thead><tbody>{diagnostics.issues.map((item,index)=><tr key={index}><td>第 {item.rowNumbers.join('、')} 条</td><td>{item.fields.map(field=>fields[field]||field).join('、')||'记录结构'}</td><td className="diagnosticMessage">{item.message}<small>{[item.employeeFingerprint?`人员指纹 ${item.employeeFingerprint}`:'',item.accountFingerprint?`账号指纹 ${item.accountFingerprint}`:''].filter(Boolean).join(' · ')}</small></td></tr>)}</tbody></table></div>
       {diagnostics.columnNames?.length>0&&<p className="diagnosticColumns">接口字段：{diagnostics.columnNames.join('、')}</p>}
     </details>}

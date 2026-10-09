@@ -9,10 +9,11 @@ export function createMdmClient() {
     return { baseUrl, clientId, clientSecret }
   }
 
-  async function request(url, options, label) {
+  async function request(url, options, label, onResponse) {
     try {
       const response = await fetch(url, { ...options, signal: AbortSignal.timeout(60_000) })
       const text = await response.text()
+      await onResponse?.({httpStatus:response.status,contentType:response.headers.get('content-type')||'',rawBody:text})
       let data
       try { data = JSON.parse(text) } catch { throw new Error(`人事${label}接口返回非 JSON 内容（HTTP ${response.status}，类型 ${response.headers.get('content-type')||'未知'}），请检查内网连接或网络代理`) }
       return { response, data }
@@ -38,7 +39,7 @@ export function createMdmClient() {
     return token.value
   }
 
-  async function readPages(kind, onProgress) {
+  async function readPages(kind, onProgress, onResponse) {
     const { baseUrl } = config()
     const records = []
     let totalPages = 1
@@ -50,7 +51,7 @@ export function createMdmClient() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getToken(attempt > 0)}` },
           body: JSON.stringify({ page, size: 200 }),
-        },kind==='department'?'部门':'人员')
+        },kind==='department'?'部门':'人员',response=>onResponse?.({...response,kind,page,attempt}))
         if (result.response.status !== 401 || attempt > 0) break
       }
       const { response, data } = result
@@ -74,8 +75,8 @@ export function createMdmClient() {
   }
 
   return {
-    async readSnapshot(onProgress) {
-      return { departments: await readPages('department', onProgress), employees: await readPages('employee', onProgress) }
+    async readSnapshot(onProgress,onResponse) {
+      return { departments: await readPages('department', onProgress,onResponse), employees: await readPages('employee', onProgress,onResponse) }
     },
   }
 }

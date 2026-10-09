@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createMdmClient } from './mdm-client.js'
 import { normalizeMdmSnapshot } from './mdm-normalize.js'
+import { createMdmSnapshotRecorder } from './mdm-snapshots.js'
 import { createUsageStats } from './usage-stats.js'
 
 const scrypt = promisify(crypto.scrypt)
@@ -207,11 +208,14 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     logSync(id,'started',{trigger})
     setImmediate(async()=>{
       let diagnostics = null
+      let recorder = null
       try {
+        recorder = await createMdmSnapshotRecorder({storageDir,syncId:id,baseUrl:process.env.MDM_API_BASE_URL||'http://daas-api.wst.com'})
         const snapshot=await mdm.readSnapshot(progress=>{
-          run('UPDATE organization_sync_runs SET stage = ?, counts_json = ? WHERE id = ?', [`正在读取${progress.kind==='department'?'部门':'人员'}：${progress.page}/${progress.totalPages} 页`,JSON.stringify(progress),id])
+          run('UPDATE organization_sync_runs SET stage = ?, counts_json = ? WHERE id = ?', [`正在读取${progress.kind==='department'?'部门':'人员'}：${progress.page}/${progress.totalPages} 页`,JSON.stringify({...progress,snapshot:recorder.info()}),id])
           logSync(id,'page',progress)
-        })
+        },recorder.saveResponse)
+        await recorder.completeCapture()
         const existing=new Map(all('SELECT * FROM users WHERE builtin=0').map(item=>[item.id,item]))
         const normalized=normalizeMdmSnapshot(snapshot,{adminUsername,existingUsers:[...existing.values()]})
         diagnostics = normalized.diagnostics
@@ -225,7 +229,7 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
           run('UPDATE organization_sync_runs SET stage=? WHERE id=?', [`正在初始化新账号：${Math.min(offset+4,newUsers.length)}/${newUsers.length}`,id])
         }
         const deactivationDeferred = diagnostics.skippedRecords>0
-        const counts={departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0,diagnostics,deactivationDeferred}
+        const counts={departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0,diagnostics,deactivationDeferred,snapshot:recorder.info()}
         const seen=new Set(normalized.users.map(item=>item.id))
         transaction(()=>{
           if (!deactivationDeferred) db.run('UPDATE departments SET active=0')
@@ -251,10 +255,14 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
           db.run("UPDATE organization_sync_runs SET status='completed',stage=?,counts_json=?,finished_at=? WHERE id=?", [stage,JSON.stringify(counts),timestamp(),id])
           audit(actor,'organization.sync',id,counts)
         })
+        try {await recorder.finish('completed')} catch {logSync(id,'snapshot_manifest_warning')}
         logSync(id,'completed',{counts})
       } catch(error) {
+        if (recorder) {
+          try {await recorder.finish('failed',error.message)} catch {logSync(id,'snapshot_save_failed')}
+        }
         diagnostics = error.diagnostics || diagnostics
-        if (diagnostics) run('UPDATE organization_sync_runs SET counts_json=? WHERE id=?',[JSON.stringify({diagnostics}),id])
+        if (diagnostics || recorder) run('UPDATE organization_sync_runs SET counts_json=? WHERE id=?',[JSON.stringify({diagnostics,snapshot:recorder?.info()}),id])
         run("UPDATE organization_sync_runs SET status='failed',stage='同步失败，保留上次成功数据',error=?,finished_at=? WHERE id=?", [error.message,timestamp(),id])
         logSync(id,'failed',{error:error.message,diagnostics})
       } finally {syncRunning=false}
