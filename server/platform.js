@@ -1,6 +1,9 @@
 import crypto from 'node:crypto'
 import { promisify } from 'node:util'
+import fs from 'node:fs'
+import path from 'node:path'
 import { createMdmClient } from './mdm-client.js'
+import { normalizeMdmSnapshot } from './mdm-normalize.js'
 import { createUsageStats } from './usage-stats.js'
 
 const scrypt = promisify(crypto.scrypt)
@@ -39,7 +42,7 @@ export function nextWeeklySlot(date = new Date()) {
   return new Date(new Date(latestWeeklySlot(date)).getTime()+7*86400_000).toISOString()
 }
 
-export async function createPlatform({ db, saveDatabase, session }) {
+export async function createPlatform({ db, saveDatabase, session, storageDir }) {
   function all(sql,params=[]) {
     const statement = db.prepare(sql)
     try {
@@ -57,6 +60,14 @@ export async function createPlatform({ db, saveDatabase, session }) {
     saveDatabase()
   }
   const timestamp = ()=>new Date().toISOString()
+  const syncLogDir = path.join(storageDir,'logs')
+  fs.mkdirSync(syncLogDir,{recursive:true})
+  const syncLogPath = path.join(syncLogDir,'mdm-sync.log')
+  function logSync(id,event,details = {}) {
+    const line = JSON.stringify({timestamp:timestamp(),syncId:id,event,...details})
+    console.info(`[MDM:${id.slice(0,8)}] ${line}`)
+    try {fs.appendFileSync(syncLogPath,`${line}\n`)} catch {console.warn('[MDM] 无法写入同步日志，诊断仍保存在同步记录中')}
+  }
   function audit(actor,action,target,details={}) {
     db.run('INSERT INTO administration_audit (actor_id,action,target_id,details_json,created_at) VALUES (?,?,?,?,?)', [actor?.id || null,action,target,JSON.stringify(details),timestamp()])
   }
@@ -188,63 +199,24 @@ export async function createPlatform({ db, saveDatabase, session }) {
     }
   }
 
-  function normalizeSnapshot(snapshot) {
-    const departmentMap=new Map()
-    for (const item of snapshot.departments) {
-      const id=String(item.deptId||'').trim()
-      if (!id || departmentMap.has(id) || !String(item.departmentName||'').trim()) throw new Error('部门数据包含空编号、空名称或重复编号')
-      departmentMap.set(id,item)
-    }
-    const firstLevels=new Map()
-    function addDepartment(id,name) {
-      if (id && name) firstLevels.set(id,{id,name:String(name).trim()})
-    }
-    for (const [id,item] of departmentMap) {
-      const parent=String(item.parentDeptId||'').trim()
-      if ((!parent || !departmentMap.has(parent) || parent===String(item.companyId||'')) && item.departmentName!==item.companyIdDesc) addDepartment(id,item.departmentName)
-    }
-    const seenEmployees=new Set(),seenAccounts=new Set()
-    const normalized=snapshot.employees.map(item=>{
-      const employeeId=String(item.employeeId||'').trim(), username=String(item.code||'').trim(), name=String(item.name||'').trim()
-      if (!employeeId || !username || !name || seenEmployees.has(employeeId) || seenAccounts.has(username)) throw new Error('人员数据包含空字段、重复工号或重复人员编号')
-      if (username===adminUsername) throw new Error('人员工号与系统管理员账号冲突，请调整 ADMIN_USERNAME')
-      seenEmployees.add(employeeId);seenAccounts.add(username)
-      let departmentId=String(item.deptTopId||'').trim()
-      let departmentName=departmentMap.get(departmentId)?.departmentName || item.deptTopIdDesc
-      if (!departmentId) {
-        let current=String(item.deptId||'').trim()
-        const visited=new Set()
-        while (departmentMap.has(current)) {
-          if (visited.has(current)) throw new Error('部门层级包含循环，保留原有组织数据')
-          visited.add(current)
-          const department=departmentMap.get(current)
-          const parent=String(department.parentDeptId||'').trim()
-          departmentId=current;departmentName=department.departmentName
-          if (!departmentMap.has(parent) || parent===String(department.companyId||'')) break
-          current=parent
-        }
-      }
-      if (departmentId && !departmentName) throw new Error('人员一级部门无法关联，请核对人事接口数据')
-      if (departmentId) addDepartment(departmentId,departmentName)
-      return {id:`mdm:${employeeId}`,employeeId,username,name,departmentId:departmentId||null}
-    })
-    if (!normalized.length && get('SELECT COUNT(*) AS count FROM users WHERE builtin=0 AND active=1').count) throw new Error('人员接口返回空快照，保留原有人员数据')
-    return {departments:[...firstLevels.values()],users:normalized}
-  }
-
   function startSync(trigger,actor) {
     if (syncRunning) return null
     syncRunning=true
     const id=crypto.randomUUID()
     run('INSERT INTO organization_sync_runs (id,trigger,actor_id,status,stage,started_at) VALUES (?,?,?,?,?,?)', [id,trigger,actor?.id||null,'running','正在获取人事接口数据',timestamp()])
+    logSync(id,'started',{trigger})
     setImmediate(async()=>{
+      let diagnostics = null
       try {
         const snapshot=await mdm.readSnapshot(progress=>{
           run('UPDATE organization_sync_runs SET stage = ?, counts_json = ? WHERE id = ?', [`正在读取${progress.kind==='department'?'部门':'人员'}：${progress.page}/${progress.totalPages} 页`,JSON.stringify(progress),id])
-          console.info(`[MDM:${id.slice(0,8)}] page ${JSON.stringify(progress)}`)
+          logSync(id,'page',progress)
         })
-        const normalized=normalizeSnapshot(snapshot)
         const existing=new Map(all('SELECT * FROM users WHERE builtin=0').map(item=>[item.id,item]))
+        const normalized=normalizeMdmSnapshot(snapshot,{adminUsername,existingUsers:[...existing.values()]})
+        diagnostics = normalized.diagnostics
+        logSync(id,'validated',{diagnostics})
+        if (!normalized.users.length && [...existing.values()].some(item=>item.active)) throw new Error('人员接口返回空快照，保留原有人员数据')
         const newUsers=normalized.users.filter(item=>!existing.has(item.id))
         const hashes=new Map()
         for (let offset=0;offset<newUsers.length;offset+=4) {
@@ -252,10 +224,11 @@ export async function createPlatform({ db, saveDatabase, session }) {
           await Promise.all(batch.map(async item=>hashes.set(item.id,await hashPassword(initialPassword))))
           run('UPDATE organization_sync_runs SET stage=? WHERE id=?', [`正在初始化新账号：${Math.min(offset+4,newUsers.length)}/${newUsers.length}`,id])
         }
-        const counts={departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0}
+        const deactivationDeferred = diagnostics.skippedRecords>0
+        const counts={departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0,diagnostics,deactivationDeferred}
         const seen=new Set(normalized.users.map(item=>item.id))
         transaction(()=>{
-          db.run('UPDATE departments SET active=0')
+          if (!deactivationDeferred) db.run('UPDATE departments SET active=0')
           for (const department of normalized.departments) db.run('INSERT INTO departments (id,name,active,updated_at) VALUES (?,?,1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1,updated_at=excluded.updated_at', [department.id,department.name,timestamp()])
           // Temporarily free mutable usernames so exchanged employee accounts can be updated atomically.
           for (const item of normalized.users) {
@@ -270,17 +243,20 @@ export async function createPlatform({ db, saveDatabase, session }) {
               db.run('UPDATE users SET username=?,name=?,department_id=?,active=1,updated_at=? WHERE id=?', [item.username,item.name,item.departmentId,timestamp(),item.id])
             } else db.run('INSERT INTO users (id,employee_id,username,name,department_id,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', [item.id,item.employeeId,item.username,item.name,item.departmentId,hashes.get(item.id),timestamp(),timestamp()])
           }
-          for (const previous of existing.values()) if (!seen.has(previous.id) && previous.active) {
+          for (const previous of existing.values()) if (!deactivationDeferred && !seen.has(previous.id) && previous.active) {
             counts.disabled++
             db.run('UPDATE users SET active=0,auth_version=auth_version+1,updated_at=? WHERE id=?', [timestamp(),previous.id])
           }
-          db.run("UPDATE organization_sync_runs SET status='completed',stage='同步完成',counts_json=?,finished_at=? WHERE id=?", [JSON.stringify(counts),timestamp(),id])
+          const stage = diagnostics.skippedRecords ? `同步完成，${diagnostics.skippedRecords} 条异常记录未导入` : '同步完成'
+          db.run("UPDATE organization_sync_runs SET status='completed',stage=?,counts_json=?,finished_at=? WHERE id=?", [stage,JSON.stringify(counts),timestamp(),id])
           audit(actor,'organization.sync',id,counts)
         })
-        console.info(`[MDM:${id.slice(0,8)}] completed ${JSON.stringify(counts)}`)
+        logSync(id,'completed',{counts})
       } catch(error) {
+        diagnostics = error.diagnostics || diagnostics
+        if (diagnostics) run('UPDATE organization_sync_runs SET counts_json=? WHERE id=?',[JSON.stringify({diagnostics}),id])
         run("UPDATE organization_sync_runs SET status='failed',stage='同步失败，保留上次成功数据',error=?,finished_at=? WHERE id=?", [error.message,timestamp(),id])
-        console.warn(`[MDM:${id.slice(0,8)}] failed ${error.message}`)
+        logSync(id,'failed',{error:error.message,diagnostics})
       } finally {syncRunning=false}
     })
     return id

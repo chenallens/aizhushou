@@ -56,7 +56,7 @@ await ensureDirectories()
 const db = await openDatabase()
 ensureSchema()
 syncGlossaryMarkdown()
-const platform = await createPlatform({ db, saveDatabase, session })
+const platform = await createPlatform({ db, saveDatabase, session, storageDir })
 
 const upload = multer({
   storage: multer.diskStorage({

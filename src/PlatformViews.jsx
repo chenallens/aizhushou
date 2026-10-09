@@ -91,6 +91,21 @@ function SearchField({value,onChange,placeholder='搜索姓名或账号'}) {
 function NameCell({user}) {return <div className="personName"><span>{user.builtin?'A':user.name.slice(0,1)}</span><strong>{user.name}</strong></div>}
 function RoleBadges({user}) {return <div className="roleBadges">{user.roles.length?user.roles.map(role=><span key={role}>{roleNames[role]||role}</span>):<small>普通用户</small>}</div>}
 
+function SyncDiagnostics({record}) {
+  const diagnostics=record?.counts?.diagnostics
+  if (!diagnostics) return null
+  const fields={employeeId:'人员编号',code:'工号',name:'姓名',deptTopId:'一级部门',deptId:'所属部门',parentDeptId:'上级部门'}
+  return <div className="syncDiagnostics">
+    <p>接口记录 {number(diagnostics.sourceRecords)} 条 · 可用人员 {number(diagnostics.acceptedRecords)} 人 · 合并重复 {number(diagnostics.duplicateRecords)} 条 · 跳过异常 {number(diagnostics.skippedRecords)} 条</p>
+    {(diagnostics.skippedRecords>0||diagnostics.nameFallbacks>0)&&<p>缺人员编号 {number(diagnostics.missingEmployeeId)} 条 · 缺工号 {number(diagnostics.missingAccount)} 条 · 姓名兜底 {number(diagnostics.nameFallbacks)} 人 · 工号冲突 {number(diagnostics.conflictingAccounts)} 组 · 人员编号冲突 {number(diagnostics.conflictingEmployeeIds)} 组</p>}
+    {record.counts.deactivationDeferred&&<p className="syncWarning">本次含异常记录，保留原账户与部门，暂不自动停用。</p>}
+    {diagnostics.issues?.length>0&&<details><summary><History size={15}/>异常明细（{diagnostics.issues.length} 个示例）</summary>
+      <div className="platformTableViewport"><table className="platformTable"><thead><tr><th>记录位置</th><th>字段</th><th>问题</th></tr></thead><tbody>{diagnostics.issues.map((item,index)=><tr key={index}><td>第 {item.rowNumbers.join('、')} 条</td><td>{item.fields.map(field=>fields[field]||field).join('、')||'记录结构'}</td><td className="diagnosticMessage">{item.message}<small>{[item.employeeFingerprint?`人员指纹 ${item.employeeFingerprint}`:'',item.accountFingerprint?`账号指纹 ${item.accountFingerprint}`:''].filter(Boolean).join(' · ')}</small></td></tr>)}</tbody></table></div>
+      {diagnostics.columnNames?.length>0&&<p className="diagnosticColumns">接口字段：{diagnostics.columnNames.join('、')}</p>}
+    </details>}
+  </div>
+}
+
 export function PermissionsCenter({api,me,setNotice,onUserChanged}) {
   const [tab,setTab]=useState('roles')
   const [roles,setRoles]=useState([])
@@ -170,6 +185,7 @@ export function PermissionsCenter({api,me,setNotice,onUserChanged}) {
   if (!me.isSuperAdmin) return <section className="workspace"><h2>权限中心仅供超级管理员使用</h2></section>
   const role=roles.find(item=>item.id===roleId)
   const selectedDepartment=directory.items.find(item=>item.id===departmentId)
+  const syncHasWarnings=sync?.lastRun?.status==='completed'&&sync?.lastRun?.counts?.diagnostics?.skippedRecords>0
   return <section className="permissionsCenter" aria-busy={loading}>
     <div className="permissionBreadcrumb">工作台<ChevronRight size={14}/>权限中心<ChevronRight size={14}/>{tab==='roles'?'角色管理':'用户管理'}</div>
     <div className="permissionLayout"><aside className="permissionSidebar"><p>权限中心</p><button className={tab==='roles'?'selected':''} type="button" onClick={()=>setTab('roles')}><ShieldCheck size={18}/>角色管理</button><button className={tab==='users'?'selected':''} type="button" onClick={()=>setTab('users')}><Users size={18}/>用户管理</button></aside>
@@ -183,11 +199,12 @@ export function PermissionsCenter({api,me,setNotice,onUserChanged}) {
           {!members.total&&<p className="empty">暂无角色成员</p>}<Pagination page={rolePage} totalPages={members.totalPages} total={members.total} onChange={setRolePage}/>
         </>:<>
           <div className="permissionTitle"><div><h2>用户管理</h2><p>总公司 / 组织与人员</p></div><span className="platformBadge neutral">共 {number(directory.totalEmployees)} 人 · {directory.items.length} 个部门</span></div>
-          <div className="syncSummary"><div><p>{sync?.lastRun?<span className={`syncBadge ${sync.lastRun.status}`}><CheckCircle2 size={15}/>{sync.lastRun.status==='running'?'正在同步':sync.lastRun.status==='failed'?'同步失败':'同步成功'}</span>:<span className="mutedText">尚未同步</span>}<span>上次成功：{time(sync?.lastSuccess?.finishedAt)}</span></p><small>下次自动同步：{time(sync?.nextRun)}</small>{sync?.running&&<p className="syncStage">{sync.lastRun?.stage}</p>}{sync?.lastRun?.error&&<p className="formError">{sync.lastRun.error}</p>}</div><button className="ghost syncButton" type="button" disabled={sync?.running||Boolean(pending)} onClick={()=>mutate('sync',async()=>{await api('/api/admin/organization-sync',{method:'POST'});setSync(await api('/api/admin/organization-sync'))},'人员同步已开始')}><RefreshCw className={sync?.running?'spinning':''} size={17}/>{sync?.running?'同步中...':'同步人员与部门'}</button></div>
+          <div className="syncSummary"><div><p>{sync?.lastRun?<span className={`syncBadge ${syncHasWarnings?'warning':sync.lastRun.status}`}><CheckCircle2 size={15}/>{sync.lastRun.status==='running'?'正在同步':sync.lastRun.status==='failed'?'同步失败':syncHasWarnings?'完成（含异常）':'同步成功'}</span>:<span className="mutedText">尚未同步</span>}<span>上次成功：{time(sync?.lastSuccess?.finishedAt)}</span></p><small>下次自动同步：{time(sync?.nextRun)}</small>{sync?.running&&<p className="syncStage">{sync.lastRun?.stage}</p>}{sync?.lastRun?.error&&<p className="formError">{sync.lastRun.error}</p>}</div><button className="ghost syncButton" type="button" disabled={sync?.running||Boolean(pending)} onClick={()=>mutate('sync',async()=>{await api('/api/admin/organization-sync',{method:'POST'});setSync(await api('/api/admin/organization-sync'))},'人员同步已开始')}><RefreshCw className={sync?.running?'spinning':''} size={17}/>{sync?.running?'同步中...':'同步人员与部门'}</button></div>
+          <SyncDiagnostics record={sync?.lastRun}/>
           <div className="organizationLayout"><aside className="departmentList"><SearchField value={departmentSearch} onChange={setDepartmentSearch} placeholder="搜索部门"/><h3><Building2 size={17}/>总公司</h3><button className={!departmentId?'selected':''} type="button" onClick={()=>{setDepartmentId('');setUserPage(1)}}><Users size={16}/><span>全部人员</span><small>{number(directory.totalEmployees)}</small></button>{directory.items.filter(item=>item.name.includes(departmentSearch)).map(item=><button className={departmentId===item.id?'selected':''} type="button" key={item.id} onClick={()=>{setDepartmentId(item.id);setUserPage(1)}}><Building2 size={16}/><span>{item.name}</span><small>{number(item.employeeCount)}</small></button>)}</aside>
             <div className="employeeDirectory"><h3>{selectedDepartment?.name||'全部人员'}</h3><div className="platformTools"><SearchField value={userSearch} onChange={value=>{setUserSearch(value);setUserPage(1)}}/></div><div className="platformTableViewport"><table className="platformTable"><thead><tr><th>姓名</th><th>账号</th><th>所属部门</th><th>角色</th><th>操作</th></tr></thead><tbody>{users.items.map(user=><tr key={user.id}><td><NameCell user={user}/></td><td>{user.username}</td><td>{user.departmentName}</td><td><RoleBadges user={user}/></td><td><button className="ghost small resetPassword" type="button" disabled={Boolean(pending)} onClick={()=>{if(window.confirm(`将 ${user.name} 的密码重置为 123456？下次登录需要修改密码。`)) mutate(user.id,()=>api(`/api/admin/users/${encodeURIComponent(user.id)}/reset-password`,{method:'POST'}),'密码已重置，下次登录需要改密')}}>重置密码</button></td></tr>)}</tbody></table></div>{!users.total&&<p className="empty">暂无人员</p>}<Pagination page={userPage} totalPages={users.totalPages} total={users.total} onChange={setUserPage}/></div>
           </div>
-          <details className="syncHistory"><summary><History size={16}/>最近同步记录</summary><div>{sync?.items.map(item=><article key={item.id}><strong>{time(item.startedAt)}</strong><span>{item.trigger==='manual'?'手动同步':'自动同步'} · {item.status==='completed'?'成功':item.status==='failed'?'失败':'进行中'}</span><p>{item.status==='completed'?`部门 ${item.counts.departments} 个 / 人员 ${item.counts.employees} 人 / 新增 ${item.counts.added} 人 / 更新 ${item.counts.updated} 人 / 停用账户 ${item.counts.disabled} 个`:item.error||item.stage}</p></article>)}</div></details>
+          <details className="syncHistory"><summary><History size={16}/>最近同步记录</summary><div>{sync?.items.map(item=><article key={item.id}><strong>{time(item.startedAt)}</strong><span>{item.trigger==='manual'?'手动同步':'自动同步'} · {item.status==='completed'?(item.counts.diagnostics?.skippedRecords?'完成（含异常）':'成功'):item.status==='failed'?'失败':'进行中'}</span><p>{item.status==='completed'?`部门 ${item.counts.departments} 个 / 人员 ${item.counts.employees} 人 / 新增 ${item.counts.added} 人 / 更新 ${item.counts.updated} 人 / 停用账户 ${item.counts.disabled} 个`:item.error||item.stage}</p><SyncDiagnostics record={item}/></article>)}</div></details>
         </>}
       </div>
     </div>

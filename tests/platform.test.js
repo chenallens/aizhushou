@@ -216,6 +216,33 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
     assert.equal((await request('/api/feedback')).items[0].reply,'fixture reply')
   })
 
+  await t.test('Dirty full-page snapshots import valid people and defer deactivation',async()=>{
+    const original=employees
+    const primary=original.find(item=>item.employeeId==='e1')
+    employees=[
+      ...original.filter(item=>item.employeeId!=='e3'),
+      {...primary,employeeId:'conflicting-person'},
+      {employeeId:'no-code',name:'无工号'},
+      {employeeId:'new-person',code:'new-account',deptTopId:'p1'},
+    ]
+    const result=await synchronize()
+    assert.equal(result.status,'completed')
+    assert.equal(result.counts.deactivationDeferred,true)
+    assert.equal(result.counts.diagnostics.missingAccount,1)
+    assert.equal(result.counts.diagnostics.conflictingAccounts,1)
+    assert.ok(result.counts.diagnostics.skippedRecords>=3)
+    const current=await request('/api/me',{client:employee})
+    assert.equal(current.name,'张明新姓名')
+    assert.ok(current.roles.includes('glossary_admin'))
+    assert.equal((await request('/api/admin/users?q=oa1003',{client:admin})).total,1)
+    assert.equal((await request('/api/admin/users?q=new-account',{client:admin})).items[0].name,'new-account')
+    const journal=await fs.readFile(path.join(storage,'logs','mdm-sync.log'),'utf8')
+    assert.ok(journal.includes('"event":"validated"'))
+    assert.ok(journal.includes('"missingAccount":1'))
+    assert.ok(!journal.includes('fixture-secret'))
+    employees=original
+  })
+
   await t.test('Password reset invalidates old sessions; assistant streaming remains available',async()=>{
     const stream=await fetch(`${origin}/api/ragflow/chat/stream`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:employee.cookie},body:JSON.stringify({question:'fixture question'})})
     assert.equal(stream.status,200)

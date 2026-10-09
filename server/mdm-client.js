@@ -9,12 +9,12 @@ export function createMdmClient() {
     return { baseUrl, clientId, clientSecret }
   }
 
-  async function request(url, options) {
+  async function request(url, options, label) {
     try {
       const response = await fetch(url, { ...options, signal: AbortSignal.timeout(60_000) })
       const text = await response.text()
       let data
-      try { data = JSON.parse(text) } catch { throw new Error('人事接口返回了非 JSON 内容') }
+      try { data = JSON.parse(text) } catch { throw new Error(`人事${label}接口返回非 JSON 内容（HTTP ${response.status}，类型 ${response.headers.get('content-type')||'未知'}），请检查内网连接或网络代理`) }
       return { response, data }
     } catch (error) {
       if (error.name === 'TimeoutError') throw new Error('人事接口请求超过 60 秒，请检查内网连接')
@@ -30,7 +30,7 @@ export function createMdmClient() {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ grant_type: 'client_credentials', client_id: settings.clientId, client_secret: settings.clientSecret }),
-    })
+    },'认证')
     if (!response.ok || typeof data.access_token !== 'string') {
       throw new Error(`人事认证失败（HTTP ${response.status}），请检查客户端配置`)
     }
@@ -50,7 +50,7 @@ export function createMdmClient() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await getToken(attempt > 0)}` },
           body: JSON.stringify({ page, size: 200 }),
-        })
+        },kind==='department'?'部门':'人员')
         if (result.response.status !== 401 || attempt > 0) break
       }
       const { response, data } = result
