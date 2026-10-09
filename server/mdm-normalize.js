@@ -39,7 +39,7 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
     }
     const previous = departmentMap.get(id)
     if (previous) {
-      if (identifier(previous.departmentName) !== name || identifier(previous.parentDeptId) !== identifier(item.parentDeptId)) {
+      if (identifier(previous.departmentName) !== name || identifier(previous.parentDeptId) !== identifier(item.parentDeptId) || identifier(previous.companyId)!==identifier(item.companyId)) {
         issue('conflicting_department','同一部门编号存在冲突',[index+1],{},['deptId','parentDeptId'])
         fatal(`部门第 ${index+1} 条编号存在冲突，保留原有组织数据`)
       }
@@ -49,27 +49,33 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
     departmentMap.set(id,item)
   })
 
-  const firstLevels = new Map()
-  function addDepartment(id,name) { if (id && name) firstLevels.set(id,{id,name}) }
+  const companies = new Map(), departments = new Map(), companyRows = new Set()
   for (const [id,item] of departmentMap) {
-    const parent = identifier(item.parentDeptId)
-    if ((!parent || !departmentMap.has(parent) || parent === identifier(item.companyId)) && item.departmentName !== item.companyIdDesc) addDepartment(id,identifier(item.departmentName))
+    const companyId=identifier(item.companyId), companyName=identifier(item.companyIdDesc)
+    if (!companyId) fatal('部门缺少公司编号，保留原有组织数据')
+    const previous=companies.get(companyId)
+    if (companyName && previous?.named && previous.name!==companyName) fatal('同一公司编号的名称存在冲突，保留原有组织数据')
+    if (!previous || companyName) companies.set(companyId,{id:companyId,name:companyName||companyId,named:Boolean(companyName)})
+    // Some older interfaces emit a separate company row in the department response.
+    if (id===companyId && companyName===identifier(item.departmentName) && !identifier(item.parentDeptId)) companyRows.add(id)
   }
-  function departmentOf(item) {
-    let id = identifier(item.deptTopId)
-    if (id) return {id,name:identifier(departmentMap.get(id)?.departmentName) || identifier(item.deptTopIdDesc)}
-    let current = identifier(item.deptId)
-    const visited = new Set()
-    while (departmentMap.has(current)) {
-      if (visited.has(current)) fatal('部门层级包含循环，保留原有组织数据')
-      visited.add(current)
-      const department = departmentMap.get(current)
-      const parent = identifier(department.parentDeptId)
-      id = current
-      if (!departmentMap.has(parent) || parent === identifier(department.companyId)) return {id,name:identifier(department.departmentName)}
-      current = parent
+  for (const [id,item] of departmentMap) {
+    if (companyRows.has(id)) continue
+    const companyId=identifier(item.companyId), parent=identifier(item.parentDeptId)
+    const parentId=!parent || parent==='-1' || (parent===companyId && companyRows.has(parent)) ? null : parent
+    departments.set(id,{id,name:identifier(item.departmentName),companyId,parentId,level:identifier(item.deptLevel)||null})
+  }
+  for (const item of departments.values()) {
+    let current=item
+    const visited=new Set()
+    while (current) {
+      if (visited.has(current.id)) fatal('部门层级包含循环，保留原有组织数据')
+      visited.add(current.id)
+      if (!current.parentId) {item.topDepartmentId=current.id;break}
+      const parent=departments.get(current.parentId)
+      if (!parent || parent.companyId!==item.companyId) fatal('部门上级不存在或跨公司，保留原有组织数据')
+      current=parent
     }
-    return {id:'',name:''}
   }
 
   const groups = new Map()
@@ -99,15 +105,17 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
       issue('invalid_account',adminConflict?'工号与系统管理员账号冲突':'工号长度超过账户限制',[rowNumber],item,['code'])
       return
     }
-    const department = departmentOf(item)
-    if (department.id && !department.name) {
+    const actualId=identifier(item.deptId) || identifier(item.deptTopId)
+    const department = departments.get(actualId)
+    const companyId=identifier(item.companyId)||department?.companyId||null
+    if ((actualId && !department) || (companyId && !companies.has(companyId)) || (department && companyId!==department.companyId)) {
       diagnostics.skippedRecords++;diagnostics.departmentIssues++
-      issue('unresolved_department','一级部门编号无法关联名称',[rowNumber],item,['deptTopId'])
+      issue('unresolved_department','实际部门无法关联或公司归属不一致',[rowNumber],item,['deptId','companyId'])
       return
     }
-    if (department.id) addDepartment(department.id,department.name)
     const candidate = {
-      id:`mdm:${employeeId}`,employeeId,username,name,departmentId:department.id||null,
+      id:`mdm:${employeeId}`,employeeId,username,name,departmentId:department?.id||null,companyId,
+      topDepartmentId:identifier(item.deptTopId)||department?.topDepartmentId||null,
       source:item,rows:[rowNumber],updatedAt:Date.parse(String(item.lastUpdateDate||'')),
     }
     if (!groups.has(employeeId)) groups.set(employeeId,[])
@@ -118,8 +126,10 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
     const usernames = new Set(versions.map(item=>item.username))
     const names = new Set(versions.map(item=>item.name).filter(Boolean))
     const departments = new Set(versions.map(item=>item.departmentId).filter(Boolean))
-    if (usernames.size>1 || names.size>1 || departments.size>1) return null
-    return {...versions[0],name:[...names][0]||'',departmentId:[...departments][0]||null,rows:versions.flatMap(item=>item.rows)}
+    if (usernames.size>1 || names.size>1 || departments.size>1 || new Set(versions.map(item=>item.companyId).filter(Boolean)).size>1 || new Set(versions.map(item=>item.topDepartmentId).filter(Boolean)).size>1) return null
+    return {...versions[0],name:[...names][0]||'',departmentId:[...departments][0]||null,
+      companyId:versions.find(item=>item.companyId)?.companyId||null,topDepartmentId:versions.find(item=>item.topDepartmentId)?.topDepartmentId||null,
+      rows:versions.flatMap(item=>item.rows)}
   }
   const candidates = []
   for (const versions of groups.values()) {
@@ -131,7 +141,7 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
     }
     if (!chosen) {
       diagnostics.conflictingEmployeeIds++;diagnostics.skippedRecords+=versions.length
-      issue('conflicting_employee','同一人员编号的工号、姓名或一级部门不一致，保留原账户',versions.flatMap(item=>item.rows),versions[0].source,['employeeId','code','name','deptTopId'])
+      issue('conflicting_employee','同一人员编号的工号、姓名或部门归属不一致，保留原账户',versions.flatMap(item=>item.rows),versions[0].source,['employeeId','code','name','deptId'])
       continue
     }
     diagnostics.duplicateRecords+=versions.length-1
@@ -169,9 +179,9 @@ export function normalizeMdmSnapshot(snapshot, { adminUsername, existingUsers = 
       diagnostics.nameFallbacks++
       issue('missing_name','姓名为空，保留已有姓名或暂用工号显示',item.rows,item.source,['name'])
     }
-    users.push({id:item.id,employeeId:item.employeeId,username:item.username,name:item.name||existingById.get(item.id)?.name||item.username,departmentId:item.departmentId})
+    users.push({id:item.id,employeeId:item.employeeId,username:item.username,name:item.name||existingById.get(item.id)?.name||item.username,departmentId:item.departmentId,companyId:item.companyId,topDepartmentId:item.topDepartmentId})
   }
   diagnostics.acceptedRecords = users.length
   if (!users.length && snapshot.employees.length) fatal(`未找到可导入人员：缺人员编号 ${diagnostics.missingEmployeeId} 条、缺工号 ${diagnostics.missingAccount} 条、工号冲突 ${diagnostics.conflictingAccounts} 组。请核对 employeeId / code 字段`)
-  return {departments:[...firstLevels.values()],users,diagnostics}
+  return {companies:[...companies.values()].map(({id,name})=>({id,name})),departments:[...departments.values()],users,diagnostics}
 }

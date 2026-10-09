@@ -43,10 +43,35 @@ test('Conflicting identity versions require an unambiguous update timestamp',()=
   const ambiguous=normalize([employee,{...employee,code:'changed-account'},extra])
   assert.equal(ambiguous.diagnostics.conflictingEmployeeIds,1)
   assert.equal(ambiguous.users.length,1)
-  const dated=normalize([{...employee,lastUpdateDate:'2026-10-01T00:00:00Z'},{...employee,code:'changed-account',deptTopId:'p2',lastUpdateDate:'2026-10-02T00:00:00Z'}])
+  const dated=normalize([{...employee,lastUpdateDate:'2026-10-01T00:00:00Z'},{...employee,code:'changed-account',deptId:'p2',deptTopId:'p2',lastUpdateDate:'2026-10-02T00:00:00Z'}])
   assert.equal(dated.users[0].username,'changed-account')
   assert.equal(dated.users[0].departmentId,'p2')
   assert.equal(dated.diagnostics.duplicateRecords,1)
+})
+
+test('Real department assignment wins over auxiliary top department; complete tree retains company namespaces',()=>{
+  const result=normalizeMdmSnapshot({departments:[
+    {deptId:100,departmentName:'制造一厂',companyId:100,companyIdDesc:'公司甲',parentDeptId:-1},
+    {deptId:200,departmentName:'设备组',companyId:100,companyIdDesc:'公司甲',parentDeptId:100},
+    {deptId:201,departmentName:'设备组',companyId:100,companyIdDesc:'公司甲',parentDeptId:100},
+    {deptId:300,departmentName:'制造一厂',companyId:200,companyIdDesc:'公司乙',parentDeptId:-1},
+  ],employees:[{...employee,companyId:100,deptId:200,deptTopId:100}]})
+  assert.equal(result.companies.length,2)
+  assert.equal(result.departments.length,4)
+  assert.equal(result.departments.find(item=>item.id==='100').parentId,null)
+  assert.equal(result.departments.find(item=>item.id==='200').parentId,'100')
+  assert.equal(result.users[0].departmentId,'200')
+  assert.equal(result.users[0].companyId,'100')
+  assert.equal(result.users[0].topDepartmentId,'100')
+})
+
+test('Invalid parent relationships fail atomically instead of guessing the tree',()=>{
+  const base={companyId:'c',companyIdDesc:'公司',departmentName:'部门'}
+  for(const nodes of [
+    [{...base,deptId:'a',parentDeptId:'missing'}],
+    [{...base,deptId:'a',parentDeptId:'b'},{...base,deptId:'b',parentDeptId:'a'}],
+    [{...base,deptId:'a',parentDeptId:'b'},{...base,companyId:'other',deptId:'b',parentDeptId:-1}],
+  ])assert.throws(()=>normalizeMdmSnapshot({departments:nodes,employees:[]}))
 })
 
 test('Partial snapshots do not reassign existing accounts to another identity',()=>{

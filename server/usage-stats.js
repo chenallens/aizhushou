@@ -22,24 +22,27 @@ export function createUsageStats({ all, get, run }) {
   function aggregate(period, key) {
     const range = periodBounds(period,key)
     const groups = new Map()
-    for (const department of all('SELECT id, name FROM departments WHERE active = 1 ORDER BY name')) {
-      groups.set(department.id, { id: department.id, name: department.name, ...emptyTotals() })
-    }
+    const companies=all('SELECT id,name FROM companies WHERE active=1 ORDER BY id').sort((a,b)=>a.id.localeCompare(b.id,'zh-CN',{numeric:true}))
+    const catalog=all('SELECT id,name,company_id AS companyId,parent_id AS parentId FROM departments WHERE active=1 ORDER BY name')
     const totals = emptyTotals()
-    const events = all('SELECT type, department_id, department_name FROM events WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id', [range.start,range.end])
+    const events = all('SELECT * FROM events WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id', [range.start,range.end])
     for (const event of events) {
       const metric = usageTypes[event.type]
       if (!metric) continue
       const id = event.department_id || 'legacy'
-      if (!groups.has(id)) groups.set(id, { id, name: event.department_name || '历史未归属', ...emptyTotals() })
-      const group = groups.get(id)
+      let ancestors=[]
+      try {ancestors=JSON.parse(event.department_path_json||'[]')} catch { /* Legacy events have no path. */ }
+      if(!Array.isArray(ancestors))ancestors=[]
+      const identity=JSON.stringify([event.company_id||null,id,ancestors])
+      if (!groups.has(identity)) groups.set(identity, { id, name: event.department_name || '历史未归属',companyId:event.company_id||null,companyName:event.company_name||null,ancestors, ...emptyTotals() })
+      const group = groups.get(identity)
       if (event.department_name) group.name = event.department_name
       group[metric]++
       group.total++
       totals[metric]++
       totals.total++
     }
-    return { period, key, ...range, totals, departments: [...groups.values()], updatedAt: new Date().toISOString() }
+    return {schemaVersion:2, period, key, ...range, totals, departments: [...groups.values()],companies,catalog, updatedAt: new Date().toISOString() }
   }
 
   function keys(period, date = new Date()) {
@@ -63,16 +66,44 @@ export function createUsageStats({ all, get, run }) {
     const archive = get('SELECT data_json, archived_at FROM statistics_archives WHERE period = ? AND period_key = ?', [period,key])
     const data = archive ? { ...JSON.parse(archive.data_json), archivedAt: archive.archived_at } : aggregate(period,key)
     const departmentId = String(query.departmentId || '')
-    const departments = departmentId ? data.departments.filter(item=>item.id === departmentId) : data.departments
-    const totals = departments.reduce((sum,item)=>{
+    const companyId=String(query.companyId||'')
+    const source = data.departments.filter(item=>(!companyId || item.companyId===companyId) && (!departmentId || item.id===departmentId || item.ancestors?.some(node=>node.id===departmentId)))
+    const totals = source.reduce((sum,item)=>{
       for (const metric of Object.keys(sum)) sum[metric] += item[metric]
       return sum
     }, emptyTotals())
+    const groups=new Map()
+    const add=(identity,item)=>{if(!groups.has(identity))groups.set(identity,{...item,key:identity,...emptyTotals()});return groups.get(identity)}
+    const companies=data.companies||[]
+    const catalog=data.catalog||[]
+    if(!companyId && !departmentId)for(const company of companies)add(`company:${company.id}`,{...company,kind:'company'})
+    if(companyId)for(const item of catalog.filter(node=>node.companyId===companyId && node.parentId===(departmentId||null)))add(`department:${item.id}`,{id:item.id,name:item.name,kind:'department'})
+    for(const item of source) {
+      let display
+      if(!companyId && !departmentId && item.companyId)display={id:item.companyId,name:item.companyName||item.companyId,kind:'company'}
+      else {
+        const ancestors=item.ancestors||[]
+        const position=departmentId?ancestors.findIndex(node=>node.id===departmentId):-1
+        const child=departmentId?(position>=0?ancestors[position+1]:null):ancestors[0]
+        display={id:child?.id||item.id,name:child?.name||item.name,kind:'department',direct:Boolean(departmentId && !child)}
+        if(!item.companyId)display.name=item.name+(item.id==='legacy'?'':'（历史归属）')
+      }
+      const group=add(`${display.kind}:${display.id}${display.direct?':direct':''}`,display)
+      for(const metric of Object.keys(emptyTotals()))group[metric]+=Number(item[metric]||0)
+    }
+    const departments=[...groups.values()]
+    const options=new Map(catalog.filter(item=>!companyId||item.companyId===companyId).map(item=>[item.id,{id:item.id,name:item.name,companyId:item.companyId}]))
+    for(const item of data.departments)if((!companyId||item.companyId===companyId)&&!options.has(item.id))options.set(item.id,{id:item.id,name:item.name,companyId:item.companyId||null})
+    for(const item of options.values()) {
+      const path=[],seen=new Set();let current=item
+      while(current&&!seen.has(current.id)) {seen.add(current.id);path.unshift(current.name);current=options.get(catalog.find(node=>node.id===current.id)?.parentId)}
+      item.path=[companies.find(node=>node.id===item.companyId)?.name,...path].filter(Boolean).join(' / ')
+    }
     const today = shanghaiDate()
     const active = get('SELECT COUNT(*) AS count FROM events WHERE type = ? AND created_at >= ? AND created_at < ?', [
       'visit', new Date(`${today}T00:00:00+08:00`).toISOString(),new Date(new Date(`${today}T00:00:00+08:00`).getTime()+86400_000).toISOString(),
     ])?.count || 0
-    return { ...data, ...totals, departments, departmentOptions: data.departments.map(({id,name})=>({id,name})), availablePeriods: keys(period), active: {day:active}, isArchived: Boolean(archive) }
+    return { ...data, ...totals, departments,companyId,departmentId,companyOptions:companies, departmentOptions:[...options.values()], availablePeriods: keys(period), active: {day:active}, isArchived: Boolean(archive) }
   }
 
   function archiveDue(date = new Date()) {

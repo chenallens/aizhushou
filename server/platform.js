@@ -4,8 +4,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createMdmClient } from './mdm-client.js'
 import { normalizeMdmSnapshot } from './mdm-normalize.js'
-import { createMdmSnapshotRecorder } from './mdm-snapshots.js'
+import { createMdmSnapshotRecorder, readLatestMdmSnapshot } from './mdm-snapshots.js'
 import { createUsageStats } from './usage-stats.js'
+import { organizationIndex } from './organization.js'
 
 const scrypt = promisify(crypto.scrypt)
 const initialPassword = '123456'
@@ -73,7 +74,15 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     db.run('INSERT INTO administration_audit (actor_id,action,target_id,details_json,created_at) VALUES (?,?,?,?,?)', [actor?.id || null,action,target,JSON.stringify(details),timestamp()])
   }
 
+  const needsHierarchy=Boolean(get("SELECT name FROM sqlite_master WHERE type='table' AND name='users'") && !all('PRAGMA table_info(users)').some(item=>item.name==='company_id'))
+  if(needsHierarchy) {
+    const backupDir=path.join(storageDir,'backups')
+    fs.mkdirSync(backupDir,{recursive:true})
+    fs.writeFileSync(path.join(backupDir,`before-organization-v2-${Date.now()}.sqlite`),Buffer.from(db.export()))
+  }
   db.run(`
+    CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY,name TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS platform_migrations (id TEXT PRIMARY KEY,details_json TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS departments (id TEXT PRIMARY KEY, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, employee_id TEXT UNIQUE, username TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
       department_id TEXT, password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1,
@@ -88,8 +97,12 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     CREATE TABLE IF NOT EXISTS statistics_archives (period TEXT NOT NULL, period_key TEXT NOT NULL, data_json TEXT NOT NULL,
       archived_at TEXT NOT NULL, PRIMARY KEY (period,period_key));
   `)
+  for(const [table,columns] of [['departments',['company_id','parent_id','source_level']],['users',['company_id','top_department_id']]]) {
+    const existing=all(`PRAGMA table_info(${table})`).map(column=>column.name)
+    for(const name of columns)if(!existing.includes(name))db.run(`ALTER TABLE ${table} ADD COLUMN ${name} TEXT`)
+  }
   const eventColumns = all('PRAGMA table_info(events)').map(column=>column.name)
-  for (const [name,type] of [['user_id','TEXT'],['department_id','TEXT'],['department_name','TEXT'],['request_key','TEXT']]) {
+  for (const [name,type] of [['user_id','TEXT'],['department_id','TEXT'],['department_name','TEXT'],['request_key','TEXT'],['company_id','TEXT'],['company_name','TEXT'],['department_path_json','TEXT']]) {
     if (!eventColumns.includes(name)) db.run(`ALTER TABLE events ADD COLUMN ${name} ${type}`)
   }
   db.run('CREATE UNIQUE INDEX IF NOT EXISTS events_request_key ON events(request_key)')
@@ -101,6 +114,39 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
   db.run("UPDATE organization_sync_runs SET status = 'failed', stage = '服务重启，同步已中断', error = '请重新同步', finished_at = ? WHERE status = 'running'", [timestamp()])
 
   const adminUsername = String(process.env.ADMIN_USERNAME || 'admin')
+  let cachedOrganization=null
+  function organization() {
+    if(!cachedOrganization)cachedOrganization=organizationIndex(
+      all('SELECT id,name FROM companies WHERE active=1'),
+      all('SELECT id,name,company_id AS companyId,parent_id AS parentId,source_level AS level FROM departments WHERE active=1'),
+      all('SELECT company_id AS companyId,department_id AS departmentId,COUNT(*) AS count FROM users WHERE active=1 AND builtin=0 GROUP BY company_id,department_id'),
+    )
+    return cachedOrganization
+  }
+  function saveOrganization(normalized,defer=false) {
+    if(!defer) {db.run('UPDATE companies SET active=0');db.run('UPDATE departments SET active=0')}
+    for(const company of normalized.companies)db.run('INSERT INTO companies (id,name,active,updated_at) VALUES (?,?,1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1,updated_at=excluded.updated_at',[company.id,company.name,timestamp()])
+    for(const department of normalized.departments)db.run(`INSERT INTO departments (id,name,company_id,parent_id,source_level,active,updated_at) VALUES (?,?,?,?,?,1,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,company_id=excluded.company_id,parent_id=excluded.parent_id,source_level=excluded.source_level,active=1,updated_at=excluded.updated_at`,[department.id,department.name,department.companyId,department.parentId,department.level,timestamp()])
+    cachedOrganization=null
+  }
+  // Rehydrate only organizational fields from the last successful capture, once per upgrade.
+  if(!get("SELECT id FROM platform_migrations WHERE id='organization-v2'")) {
+    try {
+      const capture=await readLatestMdmSnapshot(storageDir)
+      if(capture) {
+        const existingUsers=all('SELECT * FROM users WHERE builtin=0')
+        const normalized=normalizeMdmSnapshot(capture.snapshot,{adminUsername,existingUsers})
+        transaction(()=>{
+          saveOrganization(normalized,normalized.diagnostics.skippedRecords>0)
+          for(const user of normalized.users)db.run('UPDATE users SET company_id=?,department_id=?,top_department_id=? WHERE id=?',[user.companyId,user.departmentId,user.topDepartmentId,user.id])
+          db.run('INSERT INTO platform_migrations (id,details_json,created_at) VALUES (?,?,?)',['organization-v2',JSON.stringify({sourceSyncId:capture.syncId,companies:normalized.companies.length,departments:normalized.departments.length}),timestamp()])
+          audit(null,'organization.migrate',capture.syncId,{companies:normalized.companies.length,departments:normalized.departments.length})
+        })
+        logSync(capture.syncId,'hierarchy_migrated',{companies:normalized.companies.length,departments:normalized.departments.length})
+      }
+    } catch(error) {console.error(`[MDM] 组织迁移未完成，保留原账户：${error.message}`)}
+  }
   const adminPassword = process.env.ADMIN_PASSWORD || 'change-me'
   const builtin = get("SELECT * FROM users WHERE id = 'builtin:admin'")
   const adminHash = builtin && await verifyPassword(adminPassword,builtin.password_hash) ? builtin.password_hash : await hashPassword(adminPassword)
@@ -120,9 +166,11 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     if (!row) return null
     const assignedRoles = all('SELECT role_id FROM user_roles WHERE user_id = ? ORDER BY role_id', [row.id]).map(item=>item.role_id)
     const permissions = [...new Set(roles.filter(role=>assignedRoles.includes(role.id)).flatMap(role=>role.permissions))]
+    const org=organization(),department=org.departmentMap.get(row.department_id),company=org.companyMap.get(row.company_id)
     return {
       id:row.id, username:row.username, name:row.name,
       departmentId:row.department_id, departmentName:row.builtin ? '系统账户' : get('SELECT name FROM departments WHERE id = ?', [row.department_id])?.name || '未归属部门',
+      companyId:row.company_id,companyName:company?.name||null,departmentPath:department?.path||company?.name||null,topDepartmentId:row.top_department_id,
       roles:assignedRoles, permissions, mustChangePassword:Boolean(row.must_change_password), builtin:Boolean(row.builtin),
       isAdmin:permissions.length>0, isSuperAdmin:assignedRoles.includes('super_admin'),
     }
@@ -170,8 +218,9 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     const user = req?.user
     const requestKey = type !== 'visit' && typeof req?.body?.requestId === 'string' && /^[\w-]{8,100}$/.test(req.body.requestId)
       ? `${user?.id || 'guest'}:${type}:${req.body.requestId}` : null
-    run('INSERT OR IGNORE INTO events (type,created_at,user_id,department_id,department_name,request_key) VALUES (?,?,?,?,?,?)',
-      [type,timestamp(),user?.id || null,user ? user.departmentId || (user.builtin ? 'system' : 'unassigned') : null,user?.departmentName || null,requestKey])
+    const department=organization().departmentMap.get(user?.departmentId)
+    run('INSERT OR IGNORE INTO events (type,created_at,user_id,department_id,department_name,request_key,company_id,company_name,department_path_json) VALUES (?,?,?,?,?,?,?,?,?)',
+      [type,timestamp(),user?.id || null,user ? user.departmentId || (user.builtin ? 'system' : 'unassigned') : null,user?.departmentName || null,requestKey,user?.companyId||null,user?.companyName||null,department?JSON.stringify(department.ancestors):null])
   }
 
   function parsePage(query) {
@@ -183,7 +232,11 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     let where='u.active = 1'
     if (roleId) { where+=' AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role_id=?)'; params.push(roleId) }
     else where+=' AND u.builtin = 0'
-    if (query.departmentId) { where+=' AND u.department_id = ?'; params.push(String(query.departmentId)) }
+    if (query.companyId) {where+=' AND u.company_id=?';params.push(String(query.companyId))}
+    if (query.departmentId) {
+      const ids=query.includeDescendants==='false' ? [String(query.departmentId)] : organization().descendants(String(query.departmentId))
+      where+=` AND u.department_id IN (${(ids.length?ids:['__missing__']).map(()=>'?').join(',')})`;params.push(...(ids.length?ids:['__missing__']))
+    }
     const term=String(query.q||'').trim().slice(0,100)
     if (term) { where+=" AND (u.name LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\')"; const pattern=`%${term.replace(/[\\%_]/g,'\\$&')}%`; params.push(pattern,pattern) }
     const total=get(`SELECT COUNT(*) AS count FROM users u WHERE ${where}`,params).count
@@ -229,11 +282,10 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
           run('UPDATE organization_sync_runs SET stage=? WHERE id=?', [`正在初始化新账号：${Math.min(offset+4,newUsers.length)}/${newUsers.length}`,id])
         }
         const deactivationDeferred = diagnostics.skippedRecords>0
-        const counts={departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0,diagnostics,deactivationDeferred,snapshot:recorder.info()}
+        const counts={companies:normalized.companies.length,departments:normalized.departments.length,employees:normalized.users.length,added:newUsers.length,updated:0,disabled:0,diagnostics,deactivationDeferred,snapshot:recorder.info()}
         const seen=new Set(normalized.users.map(item=>item.id))
         transaction(()=>{
-          if (!deactivationDeferred) db.run('UPDATE departments SET active=0')
-          for (const department of normalized.departments) db.run('INSERT INTO departments (id,name,active,updated_at) VALUES (?,?,1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1,updated_at=excluded.updated_at', [department.id,department.name,timestamp()])
+          saveOrganization(normalized,deactivationDeferred)
           // Temporarily free mutable usernames so exchanged employee accounts can be updated atomically.
           for (const item of normalized.users) {
             if (existing.has(item.id)) db.run('UPDATE users SET username=? WHERE id=?', [`sync:${id}:${item.employeeId}`,item.id])
@@ -243,9 +295,9 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
           for (const item of normalized.users) {
             const previous=existing.get(item.id)
             if (previous) {
-              if (previous.name!==item.name || previous.username!==item.username || previous.department_id!==item.departmentId || !previous.active) counts.updated++
-              db.run('UPDATE users SET username=?,name=?,department_id=?,active=1,updated_at=? WHERE id=?', [item.username,item.name,item.departmentId,timestamp(),item.id])
-            } else db.run('INSERT INTO users (id,employee_id,username,name,department_id,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', [item.id,item.employeeId,item.username,item.name,item.departmentId,hashes.get(item.id),timestamp(),timestamp()])
+              if (previous.name!==item.name || previous.username!==item.username || previous.department_id!==item.departmentId || previous.company_id!==item.companyId || !previous.active) counts.updated++
+              db.run('UPDATE users SET username=?,name=?,department_id=?,company_id=?,top_department_id=?,active=1,updated_at=? WHERE id=?', [item.username,item.name,item.departmentId,item.companyId,item.topDepartmentId,timestamp(),item.id])
+            } else db.run('INSERT INTO users (id,employee_id,username,name,department_id,company_id,top_department_id,password_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)', [item.id,item.employeeId,item.username,item.name,item.departmentId,item.companyId,item.topDepartmentId,hashes.get(item.id),timestamp(),timestamp()])
           }
           for (const previous of existing.values()) if (!deactivationDeferred && !seen.has(previous.id) && previous.active) {
             counts.disabled++
@@ -254,7 +306,9 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
           const stage = diagnostics.skippedRecords ? `同步完成，${diagnostics.skippedRecords} 条异常记录未导入` : '同步完成'
           db.run("UPDATE organization_sync_runs SET status='completed',stage=?,counts_json=?,finished_at=? WHERE id=?", [stage,JSON.stringify(counts),timestamp(),id])
           audit(actor,'organization.sync',id,counts)
+          db.run('INSERT OR REPLACE INTO platform_migrations (id,details_json,created_at) VALUES (?,?,?)',['organization-v2',JSON.stringify({sourceSyncId:id}),timestamp()])
         })
+        cachedOrganization=null
         try {await recorder.finish('completed')} catch {logSync(id,'snapshot_manifest_warning')}
         logSync(id,'completed',{counts})
       } catch(error) {
@@ -329,7 +383,11 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
       transaction(()=>{db.run('UPDATE users SET password_hash=?,must_change_password=1,auth_version=auth_version+1,updated_at=? WHERE id=?',[hash,timestamp(),row.id]);audit(req.user,'account.reset',row.id)})
       res.json({ok:true})
     })
-    app.get('/api/admin/departments',requirePermission('users.manage'),(_req,res)=>res.json({items:all('SELECT d.id,d.name,(SELECT COUNT(*) FROM users u WHERE u.department_id=d.id AND u.active=1 AND u.builtin=0) AS employeeCount FROM departments d WHERE d.active=1 ORDER BY d.name'),totalEmployees:get('SELECT COUNT(*) AS count FROM users WHERE active=1 AND builtin=0').count}))
+    app.get('/api/admin/departments',requirePermission('users.manage'),(_req,res)=>{
+      const org=organization()
+      const serialize=({children,...item})=>({...item,childIds:children.map(child=>child.id)})
+      res.json({companies:org.companies.map(serialize),items:org.departments.map(serialize),totalEmployees:get('SELECT COUNT(*) AS count FROM users WHERE active=1 AND builtin=0').count})
+    })
     app.get('/api/admin/organization-sync',requirePermission('organization.sync'),(_req,res)=>res.json(syncState()))
     app.post('/api/admin/organization-sync',requirePermission('organization.sync'),(req,res)=>{
       const id=startSync('manual',req.user)

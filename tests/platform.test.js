@@ -25,7 +25,7 @@ test('Shanghai calendar and Monday 04:00 schedule',()=>{
 
 test('Monthly and annual archives run at 04:00, are idempotent and preserve legacy attribution',()=>{
   const db=new SQL.Database()
-  db.run('CREATE TABLE events (id INTEGER PRIMARY KEY,type TEXT,created_at TEXT,department_id TEXT,department_name TEXT); CREATE TABLE departments (id TEXT,name TEXT,active INTEGER); CREATE TABLE statistics_archives (period TEXT,period_key TEXT,data_json TEXT,archived_at TEXT,PRIMARY KEY(period,period_key));')
+  db.run('CREATE TABLE events (id INTEGER PRIMARY KEY,type TEXT,created_at TEXT,department_id TEXT,department_name TEXT); CREATE TABLE companies(id TEXT,name TEXT,active INTEGER); CREATE TABLE departments (id TEXT,name TEXT,active INTEGER,company_id TEXT,parent_id TEXT); CREATE TABLE statistics_archives (period TEXT,period_key TEXT,data_json TEXT,archived_at TEXT,PRIMARY KEY(period,period_key));')
   db.run("INSERT INTO events VALUES (1,'qa_click','2026-10-10T04:00:00.000Z',NULL,NULL),(2,'translation_click','2026-10-15T04:00:00.000Z','p1','制造一厂'),(3,'standard_click','2025-12-31T15:59:59.000Z','p2','制造二厂')")
   const all=(sql,params=[])=>{const stmt=db.prepare(sql);stmt.bind(params);const result=[];while(stmt.step())result.push(stmt.getAsObject());stmt.free();return result}
   const get=(sql,params=[])=>all(sql,params)[0]||null
@@ -145,11 +145,16 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
     assert.equal((await fs.readdir(path.join(storage,'backups'))).filter(name=>name.endsWith('.sqlite')).length,1)
     const directory=await request('/api/admin/departments',{client:admin})
     assert.equal(directory.totalEmployees,6)
-    assert.ok(directory.items.every(item=>!item.name.includes('车间')&&item.name!=='总公司'))
+    assert.equal(directory.companies.length,1)
+    assert.equal(directory.items.find(item=>item.id==='melt').parentId,'p1')
+    assert.equal(directory.items.find(item=>item.id==='p1').directCount,0)
     assert.equal(directory.items.find(item=>item.id==='p1').employeeCount,3)
     const users=await request('/api/admin/users?departmentId=p1&q=oa1001',{client:admin})
     assert.equal(users.total,1)
-    assert.equal(users.items[0].departmentName,'制造一厂')
+    assert.equal(users.items[0].departmentName,'熔炼车间')
+    assert.equal(users.items[0].departmentPath,'总公司 / 制造一厂 / 熔炼车间')
+    assert.equal((await request('/api/admin/users?departmentId=p1&includeDescendants=false',{client:admin})).total,0)
+    assert.equal((await request('/api/admin/users?companyId=company',{client:admin})).total,6)
     assert.ok(!JSON.stringify(users).includes('password_hash'))
     assert.ok(tokenRequests>=2)
     assert.ok(requestedPaths.every(value=>['/oauth/oauth/token','/hitf/v2p/rest/invoke/department','/hitf/v2p/rest/invoke/employee'].includes(value)))
