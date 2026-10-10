@@ -24,11 +24,12 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { Agent } from 'undici'
-import { callSharedModel, callSharedModelStream, readModelAudit } from './model-client.js'
+import { callSharedModel, callSharedModelStream, callDocumentModel, documentModelState, configureDocumentModels, readModelAudit } from './model-client.js'
 import { createPlatform } from './platform.js'
 import {createGlossaryStore} from './glossary.js'
 import {knowledgeAssistants} from './knowledge-assistants.js'
 import {createFormattedDocument,layoutContentMatches,markdownDocumentChunks} from './document-layout.js'
+import {concurrencyOptions,mapOrdered,validateConcurrencySettings} from './concurrency.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -41,6 +42,8 @@ const resultsDir = path.join(storageDir, 'results')
 const dbPath = path.join(storageDir, 'aizhushou.sqlite')
 const port = Number(process.env.SERVER_PORT || 4178)
 const ragflowTotalTimeoutMs = Math.max(60_000, Number(process.env.RAGFLOW_TOTAL_TIMEOUT_MS) || 30 * 60_000)
+const documentConcurrency=concurrencyOptions()
+const documentQueueNotice='当前文件任务繁忙，已进入等待队列，空位释放后会自动继续，请勿重复提交。'
 
 const defaultQaBotId = '7172f29d-69c1-4f71-9646-03ab127e8f53'
 const defaultStandardPrompt = `你是制造企业标准解读专家。请准确理解上传标准，不改变原文事实、数值、单位和约束条件。
@@ -57,6 +60,11 @@ const insecureQaDispatcher =
 await ensureDirectories()
 const db = await openDatabase()
 ensureSchema()
+const savedDocumentSettings=get('SELECT settings_json AS settingsJson FROM document_concurrency_settings WHERE id=1')
+if(savedDocumentSettings) {
+  try {Object.assign(documentConcurrency,configureDocumentModels(JSON.parse(savedDocumentSettings.settingsJson)))}
+  catch {console.warn('[documents] 已保存并发设置无效，使用环境配置或默认值')}
+}
 const glossary=createGlossaryStore({db,saveDatabase,storageDir})
 const platform = await createPlatform({ db, saveDatabase, session, storageDir })
 
@@ -106,6 +114,29 @@ app.use('/api', (req, res, next) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
+})
+
+const requireConcurrencyAdmin=(req,res,next)=>platform.requireUser(req,res,()=>{
+  if(!req.user.isSuperAdmin){res.status(403).json({error:'仅超级管理员可调整文件模型并发设置'});return}
+  next()
+})
+function documentSettingsResponse() {
+  const {translation,layout,requests,retries}=documentConcurrency
+  return {settings:{translation,layout,requests,retries},state:documentModelState(),updatedAt:get('SELECT updated_at AS updatedAt FROM document_concurrency_settings WHERE id=1')?.updatedAt||null}
+}
+app.get('/api/admin/document-concurrency',requireConcurrencyAdmin,(_req,res)=>res.set('Cache-Control','no-store').json(documentSettingsResponse()))
+app.put('/api/admin/document-concurrency',requireConcurrencyAdmin,(req,res,next)=>{
+  try {
+    const settings=validateConcurrencySettings(req.body),previous=documentSettingsResponse().settings,timestamp=now()
+    db.run('BEGIN TRANSACTION')
+    try {
+      db.run('INSERT OR REPLACE INTO document_concurrency_settings(id,settings_json,updated_by,updated_at) VALUES(1,?,?,?)',[JSON.stringify(settings),req.user.id,timestamp])
+      db.run('INSERT INTO administration_audit(actor_id,action,target_id,details_json,created_at) VALUES(?,?,?,?,?)',[req.user.id,'document_concurrency.update','document-model',JSON.stringify({previous,settings}),timestamp])
+      db.run('COMMIT');saveDatabase()
+    } catch(error) {try{db.run('ROLLBACK')}catch{}throw error}
+    Object.assign(documentConcurrency,configureDocumentModels(settings))
+    res.json({ok:true,...documentSettingsResponse()})
+  } catch(error) {next(error)}
 })
 
 app.get('/api/assistants/ragflow/open', platform.requireKnowledgeAssistant('ragflow'), (req, res) => {
@@ -874,6 +905,13 @@ function ensureSchema() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS document_concurrency_settings (
+      id INTEGER PRIMARY KEY CHECK (id=1),
+      settings_json TEXT NOT NULL,
+      updated_by TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS document_tasks (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL,
@@ -1612,6 +1650,7 @@ async function translateText(text, direction, reference) {
     const result = await runTranslationPipeline({
       sourceText:chunk,direction,glossaryMarkdown:reference.markdown,libraryName:reference.libraryName,
       purpose: `translation:${index + 1}/${chunks.length}`,
+      documentTask:true,
     })
     translated.push(stripModelThinking(result.content))
   }
@@ -1627,13 +1666,18 @@ async function runTranslationPipeline({
   streamFinal = false,
   onStage,
   onFinalDelta,
+  documentTask=false,
+  signal,
+  onModelState,
+  onStepComplete,
 }) {
   const directionText = direction === 'zh-en' ? '中文翻译为英文' : '英文翻译为中文'
   const source = cleanText(sourceText)
   if (!source) throw new Error('没有提取到可翻译内容')
+  const invoke=request=>documentTask?callDocumentModel({...request,signal,onState:onModelState}):callSharedModel({...request,signal})
 
   onStage?.({ step: 1, progress: 8, stage: '正在直接翻译' })
-  const direct = await callSharedModel({
+  const direct = await invoke({
     purpose: `${purpose}:direct`,
     messages: [
       { role: 'system', content: '你是严谨的企业文档翻译助手。关闭思考输出，只返回翻译正文。' },
@@ -1650,9 +1694,10 @@ async function runTranslationPipeline({
     mockContent: `[模拟直译]\n\n${source}`,
   })
   const directText = normalizeMarkdownSource(direct.content)
+  onStepComplete?.({step:1})
 
   onStage?.({ step: 2, progress: 38, stage: '正在依据词库修正与润色' })
-  const polished = await callSharedModel({
+  const polished = await invoke({
     purpose: `${purpose}:glossary-polish`,
     messages: [
       { role: 'system', content: '你是企业专业术语校订与语言润色助手。关闭思考输出，只返回修订后的译文。' },
@@ -1673,6 +1718,7 @@ async function runTranslationPipeline({
     mockContent: `[模拟词库润色]\n\n${directText}`,
   })
   const polishedText = normalizeMarkdownSource(polished.content)
+  onStepComplete?.({step:2})
 
   onStage?.({ step: 3, progress: 70, stage: '正在检查误译、语法和时态' })
   const finalRequest = {
@@ -1699,7 +1745,8 @@ async function runTranslationPipeline({
         ...finalRequest,
         onDelta: (value) => onFinalDelta?.(normalizeMarkdownSource(value)),
       })
-    : await callSharedModel(finalRequest)
+    : await invoke(finalRequest)
+  onStepComplete?.({step:3})
   return {
     content: normalizeMarkdownSource(checked.content),
     diagnostics: [direct.diagnostics, polished.diagnostics, checked.diagnostics],
@@ -1742,6 +1789,8 @@ function splitLongBlock(value, maxLength) {
 function createDocumentTask({ type, originalName, storedName, stage, metadata = {}, ownerId }) {
   const id = crypto.randomUUID()
   const timestamp = now()
+  const queue=documentModelState()
+  metadata={...metadata,...queueMetadata(queue.active>=queue.limit||queue.waiting>0)}
   run(
     `INSERT INTO document_tasks
       (id, type, status, progress, stage, original_name, stored_name, metadata_json, created_at, updated_at, owner_id)
@@ -1749,6 +1798,10 @@ function createDocumentTask({ type, originalName, storedName, stage, metadata = 
     [id, type, stage, originalName, storedName, JSON.stringify(metadata), timestamp, timestamp, ownerId],
   )
   return getDocumentTask(id)
+}
+
+function queueMetadata(waiting) {
+  return waiting?{queueWaiting:true,queueNotice:documentQueueNotice}:{queueWaiting:false}
 }
 
 function canReadDocumentTask(id, user) {
@@ -1829,11 +1882,11 @@ async function processTranslationDocumentTask(taskId,reference) {
   let sourceMarkdown
   if(sourceFormat==='pdf') {
     const extracted=await extractPdfMarkdown(path.join(uploadDir,task.storedName),{
-      purposePrefix:'translation-pdf',
-      onProgress:({completedPages,totalPages,pageNumber,mode})=>updateDocumentTask(taskId,{
+      purposePrefix:`translation-pdf:${taskId}`,
+      onProgress:({completedPages,totalPages,pageNumber,mode,queueWaiting=false})=>updateDocumentTask(taskId,{
         progress:6+Math.floor(completedPages/totalPages*24),
         stage:completedPages===totalPages?`已识别全部 ${totalPages} 页，准备翻译`:`第 ${pageNumber}/${totalPages} 页：${mode==='image'?'正在进行图像识别':'正在整理原文结构'}`,
-        metadata:{...metadata,totalPages,completedPages,phase:'recognizing'},
+        metadata:{...metadata,totalPages,completedPages,phase:'recognizing',...queueMetadata(queueWaiting)},
       }),
     })
     sourceMarkdown=extracted.markdown
@@ -1843,60 +1896,83 @@ async function processTranslationDocumentTask(taskId,reference) {
   if (!sourceMarkdown) throw new Error(`${sourceFormat==='pdf'?'PDF':'Word'} 文档中没有提取到可翻译内容`)
   const glossaryMarkdown = reference.markdown
   const chunks = markdownDocumentChunks(sourceMarkdown, 6500)
-  const translated = []
   const translationStart=sourceFormat==='pdf'?32:8
+  const concurrency=Math.min(documentConcurrency.translation,documentConcurrency.requests)
+  Object.assign(metadata,{translationConcurrency:concurrency,documentRequestLimitAtStart:documentConcurrency.requests})
+  const states=chunks.map((_chunk,index)=>({index:index+1,status:'pending',step:0,completedSteps:0,stage:'等待处理',attempt:0,maxAttempts:documentConcurrency.retries+1}))
+  const publish=()=>{
+    const completed=states.filter(item=>item.status==='completed').length,completedStages=states.reduce((sum,item)=>sum+item.completedSteps,0)
+    updateDocumentTask(taskId,{progress:Math.floor(translationStart+completedStages/(chunks.length*3)*(76-translationStart)),
+      stage:`翻译片段：已完成 ${completed}/${chunks.length}，最多 ${concurrency} 路并发`,
+      metadata:{...metadata,totalChunks:chunks.length,phase:'processing',...queueMetadata(states.some(item=>item.status==='queued'&&item.queueBusy)),parallel:{kind:'translation',limit:concurrency,total:chunks.length,completed,items:states.map(item=>({...item}))}},
+    })
+  }
   updateDocumentTask(taskId, {
     progress: sourceFormat==='pdf'?32:6,
     stage: `已读取文档，准备翻译 ${chunks.length} 个片段`,
     metadata: {...metadata,totalChunks:chunks.length,phase:'processing'},
   })
 
-  for (const [index, chunk] of chunks.entries()) {
+  const translated=await mapOrdered(chunks,concurrency,async(chunk,index,signal)=>{
+    const state=states[index]
     const result = await runTranslationPipeline({
       sourceText: chunk,
       direction,
       glossaryMarkdown,
       libraryName:reference.libraryName,
-      purpose: `translation-document:${index + 1}/${chunks.length}`,
+      purpose: `translation-document:${taskId}:${index + 1}/${chunks.length}`,
+      documentTask:true,signal,
       onStage: ({ step, stage }) => {
-        const completedStages = index * 3 + (step - 1)
-        const progress = Math.floor(translationStart + (completedStages / (chunks.length * 3)) * (76-translationStart))
-        updateDocumentTask(taskId, {
-          progress,
-          stage: `第 ${index + 1}/${chunks.length} 个片段：${stage}`,
-        })
+        Object.assign(state,{step,stage,status:'queued',attempt:0});publish()
       },
+      onModelState:event=>{Object.assign(state,event);publish()},
+      onStepComplete:({step})=>{state.completedSteps=step;publish()},
     })
-    translated.push(result.content)
-    diagnostics.push(...result.diagnostics)
-  }
-
-  const markdown = translated.join('\n\n')
+    state.status='completed';publish()
+    return result
+  })
+  diagnostics.push(...translated.flatMap(item=>item.diagnostics))
+  const markdown = translated.map(item=>item.content).join('\n\n')
   const resultName = `${Date.now()}-${crypto.randomUUID()}-translation.docx`
   await finishFormattedDocumentTask({taskId,markdown,resultName,diagnostics,finalStage:'翻译、质检与排版完成，可以下载 Word',metadata:{...metadata,totalChunks:chunks.length}})
 }
 
 async function finishFormattedDocumentTask({taskId,markdown,resultName,finalStage,metadata,diagnostics=[]}) {
-  const chunks=markdownDocumentChunks(markdown),laidOut=[],allDiagnostics=[...diagnostics],warnings=[]
+  const chunks=markdownDocumentChunks(markdown),allDiagnostics=[...diagnostics]
+  const concurrency=Math.min(documentConcurrency.layout,documentConcurrency.requests),task=getDocumentTask(taskId)
+  const states=chunks.map((_source,index)=>({index:index+1,status:'pending',stage:'排版检查',attempt:0,maxAttempts:documentConcurrency.retries+1}))
+  const publish=()=>{
+    const completed=states.filter(item=>item.status==='completed').length
+    updateDocumentTask(taskId,{progress:Math.floor(78+completed/chunks.length*10),stage:`模型排版检查：已完成 ${completed}/${chunks.length}，最多 ${concurrency} 路并发`,
+      metadata:{...metadata,phase:'layout-model',...queueMetadata(states.some(item=>item.status==='queued'&&item.queueBusy)),parallel:{kind:'layout',limit:concurrency,total:chunks.length,completed,items:states.map(item=>({...item}))}}})
+  }
   updateDocumentTask(taskId,{progress:78,stage:'正在准备模型排版检查',metadata:{...metadata,phase:'layout-model'}})
-  for(const [index,source]of chunks.entries()) {
-    updateDocumentTask(taskId,{progress:Math.floor(78+index/chunks.length*10),stage:`模型排版检查：第 ${index+1}/${chunks.length} 个片段`})
+  const laidOut=await mapOrdered(chunks,concurrency,async(source,index,signal)=>{
+    let content=source,warning='',diagnostic=null,failedAttempts=0
     try {
-      const result=await callSharedModel({purpose:`document-layout:${getDocumentTask(taskId).type}:${index+1}/${chunks.length}`,
+      const result=await callDocumentModel({purpose:`document-layout:${task.type}:${taskId}:${index+1}/${chunks.length}`,signal,
+        onState:event=>{Object.assign(states[index],event);publish()},
         messages:[{role:'system',content:'你是文档排版检查员。只调整 Markdown 排版结构，不翻译、不润色、不改动正文。关闭思考输出。'},
           {role:'user',content:['检查以下内容的标题层级、段落、列表和表格排版。输出完整纯 Markdown，使表头、行列和单元格对应清楚。',
             '禁止增加、删除、替换或重排正文、数字、单位、条目和链接。已合法的表格保持单元格内容和行列对应。没有确切依据时保留现有结构，不猜测合并单元格。不要输出说明或代码围栏。',`待排版内容：\n${source}`].join('\n\n')}],mockContent:source})
-      allDiagnostics.push(result.diagnostics)
+      diagnostic=result.diagnostics
       const candidate=normalizeMarkdownSource(result.content)
-      if(candidate&&layoutContentMatches(source,candidate))laidOut.push(candidate)
-      else {laidOut.push(source);warnings.push(`第 ${index+1} 个片段排版未通过内容一致性校验，已保留原结果。`)}
-    } catch {
-      laidOut.push(source);warnings.push(`第 ${index+1} 个片段模型排版未完成，已保留原结果并使用程序排版。`)
+      if(candidate&&layoutContentMatches(source,candidate))content=candidate
+      else warning=`第 ${index+1} 个片段排版未通过内容一致性校验，已保留原结果。`
+    } catch(error) {
+      signal.throwIfAborted()
+      failedAttempts=error.documentAttempts||1
+      warning=`第 ${index+1} 个片段模型排版未完成，已保留原结果并使用程序排版。`
     }
-  }
-  let finalMarkdown=laidOut.join('\n\n')
+    states[index].status='completed';publish()
+    return {content,warning,diagnostic,failedAttempts}
+  })
+  allDiagnostics.push(...laidOut.map(item=>item.diagnostic).filter(Boolean))
+  const warnings=laidOut.map(item=>item.warning).filter(Boolean)
+  let finalMarkdown=laidOut.map(item=>item.content).join('\n\n')
   if(!layoutContentMatches(markdown,finalMarkdown)){finalMarkdown=markdown;warnings.push('整篇排版未通过一致性校验，已保留原结果。')}
-  const layoutMetadata={...metadata,phase:'layout',layoutModel:{chunks:chunks.length,warnings},...buildTaskDiagnostics({diagnostics:allDiagnostics})}
+  const failures=laidOut.filter(item=>item.failedAttempts),failedAttempts=failures.reduce((sum,item)=>sum+item.failedAttempts,0)
+  const layoutMetadata={...metadata,phase:'layout',layoutModel:{chunks:chunks.length,concurrency,warnings},...buildTaskDiagnostics({diagnostics:allDiagnostics,failedAttempts,failedCalls:failures.length})}
   updateDocumentTask(taskId,{progress:89,stage:'正在恢复表格与段落排版',metadata:layoutMetadata})
   let lastProgress=-1
   const layout=await createFormattedDocument({source:finalMarkdown,outputPath:path.join(resultsDir,resultName),
@@ -1967,10 +2043,11 @@ async function processPdfToWordTask(taskId) {
   if (!task) return
   updateDocumentTask(taskId, { status: 'processing', progress: 3, stage: '正在读取 PDF',metadata:{phase:'reading'} })
   const extracted=await extractPdfMarkdown(path.join(uploadDir,task.storedName),{
-    onProgress:({completedPages,totalPages,pageNumber,mode})=>updateDocumentTask(taskId,{
+    purposePrefix:`pdf:${taskId}`,
+    onProgress:({completedPages,totalPages,pageNumber,mode,queueWaiting=false})=>updateDocumentTask(taskId,{
       progress:10+Math.floor(completedPages/totalPages*66),
       stage:completedPages===totalPages?`已完成全部 ${totalPages} 页`:`第 ${pageNumber}/${totalPages} 页：${mode==='image'?'正在进行图像识别':'正在整理原文结构'}`,
-      metadata:{totalPages,completedPages,phase:'processing'},
+      metadata:{totalPages,completedPages,phase:'processing',...queueMetadata(queueWaiting)},
     }),
   })
   const resultName = `${Date.now()}-${crypto.randomUUID()}-pdf-to-word.docx`
@@ -1991,10 +2068,12 @@ async function extractPdfMarkdown(filePath,{onProgress,purposePrefix='pdf'}={}) 
       const sourceText = cleanText(page.text || '')
       const mode=sourceText.length>=80?'text':'image'
       await onProgress?.({completedPages:index,totalPages:pages.length,pageNumber,mode})
+      const onState=event=>onProgress?.({completedPages:index,totalPages:pages.length,pageNumber,mode,queueWaiting:event.status==='queued'&&event.queueBusy})
       let result
       if (mode==='text') {
         recognition.textPages++
-        result = await callSharedModel({
+        result = await callDocumentModel({
+          onState,
           purpose: `${purposePrefix}-layout:text-page-${pageNumber}`,
           messages: [{ role: 'user', content: buildPdfTextPrompt(sourceText, pageNumber, pages.length) }],
           mockContent: `## 第 ${pageNumber} 页\n\n${sourceText}`,
@@ -2004,7 +2083,8 @@ async function extractPdfMarkdown(filePath,{onProgress,purposePrefix='pdf'}={}) 
         const screenshot = await parser.getScreenshot({ partial: [pageNumber], desiredWidth: 1800 })
         const imageUrl = screenshot.pages?.[0]?.dataUrl
         if (!imageUrl) throw new Error(`第 ${pageNumber} 页图像渲染失败`)
-        result = await callSharedModel({
+        result = await callDocumentModel({
+          onState,
           purpose: `${purposePrefix}-ocr:image-page-${pageNumber}`,
           messages: [
             {
@@ -2018,7 +2098,7 @@ async function extractPdfMarkdown(filePath,{onProgress,purposePrefix='pdf'}={}) 
           mockContent: `## 第 ${pageNumber} 页\n\n[模拟模式：该页需要内网模型进行图像识别]`,
         })
       }
-      const normalized = await ensurePureMarkdown(result.content, pageNumber)
+      const normalized = await ensurePureMarkdown(result.content, pageNumber,{onState,purposePrefix})
       if(!normalized.content)throw new Error(`第 ${pageNumber} 页未识别出内容，请检查文档或模型返回`)
       diagnostics.push(result.diagnostics, ...normalized.diagnostics)
       renderedPages.push(normalized.content)
@@ -2057,8 +2137,9 @@ async function processStandardTask(taskId, assistantId) {
       stage: `正在解读牌号 ${grade}，第 ${index + 1}/${chunks.length} 个文档片段`,
       metadata: { grade, totalChunks: chunks.length },
     })
-    const result = await callSharedModel({
-      purpose: `${assistantId}:${index + 1}/${chunks.length}`,
+    const result = await callDocumentModel({
+      purpose: `${assistantId}:${taskId}:${index + 1}/${chunks.length}`,
+      onState:event=>updateDocumentTask(taskId,{metadata:{grade,totalChunks:chunks.length,...queueMetadata(event.status==='queued'&&event.queueBusy)}}),
       messages: [
         { role: 'system', content: prompt },
         {
@@ -2115,13 +2196,13 @@ function buildPdfImagePrompt(pageNumber, totalPages) {
   ].join('\n')
 }
 
-async function ensurePureMarkdown(value, pageNumber) {
+async function ensurePureMarkdown(value, pageNumber,{onState,purposePrefix='pdf'}={}) {
   let content = normalizeMarkdownSource(value)
   const diagnostics = []
   const hasUnsupportedHtml=text=>/<\/?(?:table|tr|td|th|div|p|h[1-6]|img|br|span)\b/i.test(text.replace(/<br\s*\/?>/gi,''))
   if (hasUnsupportedHtml(content)) {
-    const result = await callSharedModel({
-      purpose: `pdf-markdown-normalize:page-${pageNumber}`,
+    const result = await callDocumentModel({
+      purpose: `${purposePrefix}-markdown-normalize:page-${pageNumber}`,onState,
       messages: [
         {
           role: 'user',
@@ -2151,7 +2232,7 @@ function normalizeMarkdownSource(value) {
     .trim()
 }
 
-function buildTaskDiagnostics({ diagnostics, ...counts }) {
+function buildTaskDiagnostics({ diagnostics,failedAttempts=0,failedCalls=0, ...counts }) {
   const responses = diagnostics.length
   const reasoningResponses = diagnostics.filter(
     (item) => item.responseHasReasoning || item.contentContainsThinkTag,
@@ -2159,6 +2240,8 @@ function buildTaskDiagnostics({ diagnostics, ...counts }) {
   return {
     ...counts,
     modelCalls: responses,
+    modelAttempts:diagnostics.reduce((sum,item)=>sum+(item.documentAttempts||1),0)+failedAttempts,
+    modelRetries:diagnostics.reduce((sum,item)=>sum+Math.max(0,(item.documentAttempts||1)-1),0)+Math.max(0,failedAttempts-failedCalls),
     thinkingDisabledRequested: true,
     reasoningResponses,
     thinkingVerification:

@@ -1,12 +1,60 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {setTimeout as sleep} from 'node:timers/promises'
+import {concurrencyOptions,createLimiter,retryableModelError,validateConcurrencySettings} from './concurrency.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const auditDir = path.resolve(process.env.STORAGE_DIR || path.resolve(__dirname, '..', 'storage'), 'logs')
 const auditPath = path.join(auditDir, 'model-audit.log')
+const documentAuditPath=path.join(auditDir,'document-concurrency.log')
+const documentOptions=concurrencyOptions(),documentLimiter=createLimiter(documentOptions.requests)
+let documentAuditWrites=Promise.resolve()
+export const documentModelState=()=>documentLimiter.state()
+export function configureDocumentModels(value) {
+  const settings=validateConcurrencySettings(value)
+  Object.assign(documentOptions,settings)
+  documentLimiter.setLimit(settings.requests)
+  return settings
+}
 
-export async function callSharedModel({ messages, purpose, mockContent = '' }) {
+export async function callDocumentModel({onState,signal,...request}) {
+  const startedAt=Date.now(),maxAttempts=documentOptions.retries+1
+  for(let attempt=1;attempt<=maxAttempts;attempt++) {
+    signal?.throwIfAborted()
+    const queuedAt=Date.now()
+    const queue=documentModelState()
+    onState?.({status:'queued',attempt,maxAttempts,queueBusy:queue.active>=queue.limit||queue.waiting>0})
+    await writeDocumentAudit({purpose:request.purpose,event:'queued',attempt,maxAttempts})
+    try {
+      const result=await documentLimiter.run(async()=>{
+        const queueWaitMs=Date.now()-queuedAt
+        onState?.({status:'running',attempt,maxAttempts,queueBusy:false})
+        await writeDocumentAudit({purpose:request.purpose,event:'started',attempt,maxAttempts,queueWaitMs})
+        return callSharedModel({...request,signal})
+      },signal)
+      await writeDocumentAudit({purpose:request.purpose,event:'completed',attempt,maxAttempts,durationMs:Date.now()-startedAt})
+      return {...result,diagnostics:{...result.diagnostics,documentAttempts:attempt}}
+    } catch(error) {
+      const cancelled=signal?.aborted,retry=!cancelled&&attempt<maxAttempts&&retryableModelError(error)
+      await writeDocumentAudit({purpose:request.purpose,event:cancelled?'cancelled':retry?'retry':'failed',attempt,maxAttempts,statusCode:error.status||null,errorName:error.name,durationMs:Date.now()-startedAt})
+      if(!retry){
+        onState?.({status:cancelled?'cancelled':'failed',attempt,maxAttempts,queueBusy:false})
+        if(!cancelled)error.documentAttempts=attempt
+        throw error
+      }
+      onState?.({status:'retrying',attempt,maxAttempts,queueBusy:false})
+      try {await sleep(documentOptions.retryDelay*2**(attempt-1),undefined,{signal})}
+      catch(error) {
+        onState?.({status:'cancelled',attempt,maxAttempts,queueBusy:false})
+        await writeDocumentAudit({purpose:request.purpose,event:'cancelled',attempt,maxAttempts,durationMs:Date.now()-startedAt})
+        throw signal?.reason||error
+      }
+    }
+  }
+}
+
+export async function callSharedModel({ messages, purpose, mockContent = '',signal }) {
   const startedAt = Date.now()
   const endpoint = String(
     process.env.AI_MODEL_API_URL ||
@@ -46,7 +94,7 @@ export async function callSharedModel({ messages, purpose, mockContent = '' }) {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(10 * 60 * 1000),
+      signal: signal?AbortSignal.any([signal,AbortSignal.timeout(10 * 60 * 1000)]):AbortSignal.timeout(10 * 60 * 1000),
     })
     data = await readJsonResponse(response)
     const content = extractModelContent(data)
@@ -61,7 +109,7 @@ export async function callSharedModel({ messages, purpose, mockContent = '' }) {
       ...diagnostics,
     })
     if (!response.ok) {
-      throw new Error(extractModelError(data) || `模型调用失败，状态码 ${response.status}`)
+      throw Object.assign(new Error(extractModelError(data) || `模型调用失败，状态码 ${response.status}`),{status:response.status})
     }
     if (!content) throw new Error('模型未返回可用内容')
     return { content, diagnostics }
@@ -336,4 +384,13 @@ async function writeAudit(entry) {
     ...(entry.error ? { error: String(entry.error).slice(0, 500) } : {}),
   }
   await fsp.appendFile(auditPath, `${JSON.stringify(safeEntry)}\n`, 'utf8')
+}
+
+async function writeDocumentAudit(entry) {
+  const line=JSON.stringify({timestamp:new Date().toISOString(),...entry})+'\n'
+  documentAuditWrites=documentAuditWrites.catch(()=>{}).then(async()=>{
+    await fsp.mkdir(auditDir,{recursive:true})
+    await fsp.appendFile(documentAuditPath,line,'utf8')
+  })
+  await documentAuditWrites.catch(()=>{})
 }

@@ -40,6 +40,7 @@ async function main() {
   await fs.cp(path.join(base,'app','aizhushou','runtime'),path.join(app,'runtime'),{recursive:true})
   for(const file of ['package.json','package-lock.json','.env.example','README.md','AI助手项目现状.md','10月新增功能使用说明.md'])await fs.copyFile(path.join(project,file),path.join(app,file))
   const config=dotenv.parse(await fs.readFile(path.join(project,'.env'),'utf8'))
+  for(const[key,value]of Object.entries({TRANSLATION_CHUNK_CONCURRENCY:'2',DOCUMENT_LAYOUT_CONCURRENCY:'2',AI_DOCUMENT_MAX_CONCURRENCY:'2',AI_DOCUMENT_RETRY_COUNT:'1'}))if(config[key]===undefined)config[key]=value
   delete config.STORAGE_DIR
   delete config.PLATFORM_SCHEDULER_DISABLED
   config.SERVER_PORT='4178';config.MOCK_AI='false'

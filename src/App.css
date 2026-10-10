@@ -151,6 +151,8 @@
   color: #174a7a;
   background: #eef7ff;
 }
+.notice>span { min-width:0; overflow-wrap:anywhere; }
+.notice>button { flex-shrink:0; white-space:nowrap; }
 
 .notice button,
 .dialogHead button {
@@ -1246,6 +1248,26 @@ h2 {
 .documentTaskSteps.pdfTranslationSteps { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .documentTaskSteps .done { color: var(--green); }
 .documentTaskSteps .current { color: var(--blue); }
+.parallelTaskProgress { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.modelQueueNotice { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 10px 0; color: var(--amber); font-size: 12px; line-height: 1.7; }
+.modelQueueNotice svg { flex: 0 0 auto; margin-top: 2px; }
+.concurrencyRuntime { display:flex; flex-wrap:wrap; gap:16px; padding-bottom:16px; color:var(--muted); font-size:13px; }
+.concurrencyInputs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 32px; }
+.concurrencyInputs label { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:14px; }
+.concurrencyInputs input { width:88px; flex:0 0 88px; min-height:38px; padding:7px 10px; border:1px solid var(--line-strong); border-radius:4px; background:#fff; color:var(--ink); font:inherit; }
+.concurrencyInputs input:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+.concurrencySave { display:flex; flex-wrap:wrap; align-items:center; gap:16px; margin-top:20px; }
+.concurrencySave span { color:var(--muted); font-size:12px; }
+@media(max-width:760px){.concurrencyInputs{grid-template-columns:minmax(0,1fr)}.concurrencyRuntime{gap:8px 16px}}
+.parallelTaskProgress p { margin: 0 0 8px; color: var(--muted); }
+.parallelTaskProgress ul { list-style: none; margin: 0; padding: 0; }
+.parallelTaskProgress li { display: grid; grid-template-columns: 62px minmax(0,1fr) auto; align-items: start; gap: 8px; padding: 4px 0; }
+.parallelTaskProgress li span { overflow-wrap: anywhere; }
+.parallelTaskProgress .parallelStatus { color: var(--muted); text-align: right; }
+.parallelTaskProgress .running { color: var(--blue); }
+.parallelTaskProgress .retrying { color: var(--amber); }
+.parallelTaskProgress .failed { color: #c43e3e; }
+@media(max-width:500px){.parallelTaskProgress li{grid-template-columns:52px minmax(0,1fr)}.parallelTaskProgress .parallelStatus{grid-column:2;text-align:left}}
 .layoutWarning { color: var(--amber); font-size: 12px; line-height: 1.7; margin-top: 10px; }
 .documentBody .formattedDocument { font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
 .documentBody .formattedDocument h1 { font-size: 24px; line-height: 1.4; margin: 0 0 16px; }
@@ -1559,6 +1581,8 @@ h2 {
   color: var(--faint);
   font-size: 12px;
 }
+.auditItem>div { min-width:0; }
+.auditItem strong { overflow-wrap:anywhere; }
 
 .auditItem > b {
   font-size: 13px;

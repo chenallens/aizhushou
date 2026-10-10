@@ -5,6 +5,7 @@ import {
   Bot,
   BookOpenCheck,
   CheckCircle2,
+  Clock3,
   ChevronDown,
   ChevronLeft,
   CircleUserRound,
@@ -1077,6 +1078,7 @@ function DocumentTaskView({
         const data = await api(`/api/document-tasks/${task.id}`)
         if (!active) return
         setTask(data.task)
+        if(task.metadata?.queueNotice&&data.task.status==='processing'&&data.task.metadata?.phase!=='reading'&&!data.task.metadata?.queueWaiting)setNotice(current=>current===task.metadata.queueNotice?'':current)
         if (data.task.status === 'completed') setNotice('文档处理完成')
         if (data.task.status === 'failed') setNotice(data.task.error || '文档处理失败')
       } catch (error) {
@@ -1089,7 +1091,7 @@ function DocumentTaskView({
       active = false
       window.clearInterval(timer)
     }
-  }, [task?.id, processing, setNotice])
+  }, [task?.id, processing, task?.metadata?.queueNotice, setNotice])
 
   async function submit(event) {
     event.preventDefault()
@@ -1106,7 +1108,7 @@ function DocumentTaskView({
     try {
       const data = await api(endpoint, { method: 'POST', body: formData })
       setTask(data.task)
-      setNotice('文件已上传，开始处理')
+      setNotice(data.task.metadata?.queueNotice||'文件已上传，开始处理')
     } catch (error) {
       setNotice(error.message)
     } finally {
@@ -1149,7 +1151,9 @@ function DocumentTaskView({
             <b>{task.progress}%</b>
           </div>
           <div className="progressTrack"><i style={{ width: `${task.progress}%` }} /></div>
+          {task.metadata?.queueWaiting&&<p className="modelQueueNotice" role="status"><Clock3 size={16}/><span>{task.metadata.queueNotice}</span></p>}
           {task.metadata?.phase&&['pdf-to-word','translation-document'].includes(task.type)&&<DocumentTaskSteps task={task}/>}
+          {task.metadata?.parallel&&<ParallelTaskProgress parallel={task.metadata.parallel}/>}
           {task.metadata?.layoutModel?.warnings?.map((warning,index)=><p className="layoutWarning" key={index}>{warning}</p>)}
           {task.error && <p className="formError">{task.error}</p>}
           {task.metadata?.thinkingVerification && (
@@ -1181,6 +1185,17 @@ function DocumentTaskSteps({task}) {
   return <ol className={`documentTaskSteps${pdfTranslation?' pdfTranslationSteps':''}`} aria-label="文档处理步骤">{labels.map((label,index)=><li className={index<current?'done':index===current?'current':''} aria-current={index===current?'step':undefined} key={label}>
     {index<current?<CheckCircle2 size={15}/>:index===current?<Settings2 size={15} className={task.status==='processing'?'spinning':''}/>:<Square size={13}/>}<span>{label}</span>
   </li>)}</ol>
+}
+
+function ParallelTaskProgress({parallel}) {
+  const active=parallel.items.filter(item=>['queued','running','retrying','failed','cancelled'].includes(item.status))
+  const statuses={queued:'等待模型',running:'处理中',retrying:'等待重试',failed:'失败',cancelled:'已停止'}
+  return <div className="parallelTaskProgress">
+    <p>{parallel.kind==='layout'?'排版检查':'翻译片段'}：已完成 {parallel.completed}/{parallel.total}，最多 {parallel.limit} 路</p>
+    <ul>{active.map(item=><li key={item.index}>
+      <span>片段 {item.index}</span><span>{item.stage}</span><span className={'parallelStatus '+item.status}>{statuses[item.status]}{item.attempt>1?'（第 '+item.attempt+' 次尝试）':item.status==='retrying'?'（准备第 '+(item.attempt+1)+' 次尝试）':''}</span>
+    </li>)}</ul>
+  </div>
 }
 
 function DocumentPane({ title, html }) {
@@ -1230,7 +1245,7 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
   const [prompts, setPrompts] = useState([])
   const [audit, setAudit] = useState([])
   const [savingPrompt, setSavingPrompt] = useState('')
-  const [expandedSections, setExpandedSections] = useState({ glossary: false, prompts: false, audit: false })
+  const [expandedSections, setExpandedSections] = useState({ glossary: false, prompts: false, audit: false, concurrency:false })
 
   useEffect(() => {
     if (isAdmin) {
@@ -1327,6 +1342,16 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
         </div>
       </AdminCollapsibleSection>}
 
+      {me.isSuperAdmin&&<AdminCollapsibleSection
+        className="documentConcurrencySettings"
+        sectionId="admin-document-concurrency"
+        eyebrow="Document Processing"
+        title="文件模型并发设置"
+        summary="超级管理员"
+        open={expandedSections.concurrency}
+        onToggle={()=>toggleSection('concurrency')}
+      ><DocumentConcurrencyControls active={expandedSections.concurrency} setNotice={setNotice}/></AdminCollapsibleSection>}
+
       {canReadAudit && <AdminCollapsibleSection
         className="modelAudit"
         sectionId="admin-model-audit"
@@ -1361,6 +1386,36 @@ function AdminView({ me, isAdmin, onRequireLogin, setNotice }) {
       </AdminCollapsibleSection>}
     </section>
   )
+}
+
+function DocumentConcurrencyControls({active,setNotice}) {
+  const [values,setValues]=useState(null),[state,setState]=useState(null),[saving,setSaving]=useState(false),[updatedAt,setUpdatedAt]=useState(null)
+  useEffect(()=>{
+    if(!active)return
+    const controller=new AbortController()
+    const refresh=()=>api('/api/admin/document-concurrency',{signal:controller.signal}).then(data=>{
+      if(controller.signal.aborted)return
+      setValues(current=>current||data.settings);setState(data.state);setUpdatedAt(data.updatedAt)
+    }).catch(error=>{if(!controller.signal.aborted)setNotice(error.message)})
+    refresh()
+    const timer=window.setInterval(refresh,5000)
+    return()=>{controller.abort();window.clearInterval(timer)}
+  },[active,setNotice])
+  async function save(event) {
+    event.preventDefault();setSaving(true)
+    try {
+      const data=await api('/api/admin/document-concurrency',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)})
+      setValues(data.settings);setState(data.state);setUpdatedAt(data.updatedAt);setNotice('文件模型并发设置已保存')
+    } catch(error){setNotice(error.message)}finally{setSaving(false)}
+  }
+  if(!values)return <p className="empty">正在读取并发设置...</p>
+  return <form className="concurrencyControlForm" onSubmit={save}>
+    <div className="concurrencyRuntime"><span>正在处理：{state?.active||0}</span><span>共享上限：{state?.limit||values.requests}</span><span>排队请求：{state?.waiting||0}</span></div>
+    <div className="concurrencyInputs">{[['requests','共享请求上限',1,8],['translation','翻译片段并发',1,4],['layout','排版检查并发',1,4],['retries','临时故障重试次数',0,2]].map(([key,label,min,max])=><label key={key}>
+      <span>{label}</span><input type="number" required min={min} max={max} step="1" aria-label={label} disabled={saving} value={values[key]} onChange={event=>setValues(current=>({...current,[key]:Number(event.target.value)}))}/>
+    </label>)}</div>
+    <div className="concurrencySave"><button className="primary small" type="submit" disabled={saving}><Save size={16}/>{saving?'保存中...':'保存并发设置'}</button>{updatedAt&&<span>最近保存：{formatTime(updatedAt)}</span>}</div>
+  </form>
 }
 
 function FeedbackDialog({ onClose, onSaved }) {
