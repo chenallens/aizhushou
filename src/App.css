@@ -1243,6 +1243,7 @@ h2 {
 }
 
 .documentTaskSteps svg { flex: 0 0 auto; }
+.documentTaskSteps.pdfTranslationSteps { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .documentTaskSteps .done { color: var(--green); }
 .documentTaskSteps .current { color: var(--blue); }
 .layoutWarning { color: var(--amber); font-size: 12px; line-height: 1.7; margin-top: 10px; }
@@ -1255,7 +1256,7 @@ h2 {
 .documentBody .formattedDocument td p { margin-bottom: 0; }
 .documentBody .formattedDocument pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: #f4f7fa; }
 .documentBody .formattedDocument blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--line-strong); }
-@media(max-width:760px){.documentTaskSteps{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.documentTaskSteps li{font-size:11px}.documentDownloads{width:100%}.translationLibraryPicker{flex:1;min-width:0}}
+@media(max-width:760px){.documentTaskSteps,.documentTaskSteps.pdfTranslationSteps{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.documentTaskSteps li{font-size:11px}.documentDownloads{width:100%}.translationLibraryPicker{flex:1;min-width:0}}
 
 .adminLocked {
   display: grid;

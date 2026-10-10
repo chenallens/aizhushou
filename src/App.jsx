@@ -330,7 +330,7 @@ function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdm
             <span className="assistantIcon"><Languages size={26} /></span>
             <span>
               <strong>翻译助手</strong>
-              <small>支持文本对话与 Word 文档，并使用管理员词库完成翻译校订。</small>
+              <small>支持文本对话、Word 和 PDF 文档，并使用管理员词库完成翻译校订。</small>
             </span>
           </button>
         </div>
@@ -888,7 +888,7 @@ function TranslateView({ setNotice }) {
               <MessageSquare size={16} /> 对话翻译
             </button>
             <button type="button" disabled={processing} className={mode === 'document' ? 'active' : ''} onClick={() => setMode('document')}>
-              <FileText size={16} /> Word 文件
+              <FileText size={16} /> 文件翻译
             </button>
           </div>
           <DirectionControl direction={direction} setDirection={setDirection} disabled={processing} />
@@ -935,12 +935,12 @@ function TranslateView({ setNotice }) {
         </div>
       ) : (
         <div className="translationDocumentMode">
-          <div className="fileTypeNotice"><FileWarning size={19} /><span>仅支持 DOCX Word 文件，请勿上传 PDF、Excel 或其他格式。</span></div>
+          <div className="fileTypeNotice"><FileWarning size={19} /><span>支持 DOCX Word 和 PDF 文件，请勿上传 Excel、旧版 DOC 或其他格式。</span></div>
           <DocumentTaskView
             endpoint="/api/translate/document"
-            accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            emptyLabel="选择待翻译 Word 文档"
-            fileHint="支持段落与表格，单文件最大 200 MB"
+            accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            emptyLabel="选择待翻译 Word 或 PDF 文档"
+            fileHint="支持 DOCX、文本 PDF 与扫描 PDF，单文件最大 200 MB"
             actionLabel="开始翻译"
             workingLabel="正在翻译"
             icon={<Languages size={30} />}
@@ -1174,10 +1174,11 @@ function DocumentTaskView({
 }
 
 function DocumentTaskSteps({task}) {
-  const phases=['reading','processing','layout-model','layout','generating']
-  const labels=['读取文档',task.type==='pdf-to-word'?'逐页识别':'翻译与校订','模型排版检查','恢复表格与段落','生成 Word']
+  const pdfTranslation=task.type==='translation-document'&&(task.metadata.sourceFormat==='pdf'||/\.pdf$/i.test(task.originalName))
+  const phases=pdfTranslation?['reading','recognizing','processing','layout-model','layout','generating']:['reading','processing','layout-model','layout','generating']
+  const labels=pdfTranslation?['读取 PDF','逐页识别','翻译与校订','模型排版检查','恢复表格与段落','生成 Word']:['读取文档',task.type==='pdf-to-word'?'逐页识别':'翻译与校订','模型排版检查','恢复表格与段落','生成 Word']
   const current=task.metadata.phase==='completed'?phases.length:Math.max(0,phases.indexOf(task.metadata.phase))
-  return <ol className="documentTaskSteps" aria-label="文档处理步骤">{labels.map((label,index)=><li className={index<current?'done':index===current?'current':''} aria-current={index===current?'step':undefined} key={label}>
+  return <ol className={`documentTaskSteps${pdfTranslation?' pdfTranslationSteps':''}`} aria-label="文档处理步骤">{labels.map((label,index)=><li className={index<current?'done':index===current?'current':''} aria-current={index===current?'step':undefined} key={label}>
     {index<current?<CheckCircle2 size={15}/>:index===current?<Settings2 size={15} className={task.status==='processing'?'spinning':''}/>:<Square size={13}/>}<span>{label}</span>
   </li>)}</ol>
 }

@@ -610,12 +610,13 @@ app.post('/api/translate/chat/stream', async (req, res, next) => {
 app.post('/api/translate/document', upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
-      res.status(400).json({ error: '请选择要翻译的 Word 文件' })
+      res.status(400).json({ error: '请选择要翻译的 DOCX 或 PDF 文件' })
       return
     }
-    if (path.extname(req.file.originalname || '').toLowerCase() !== '.docx') {
+    const sourceFormat=path.extname(req.file.originalname || '').toLowerCase().slice(1)
+    if (!['docx','pdf'].includes(sourceFormat)) {
       await removeFile(req.file.path)
-      res.status(400).json({ error: '文件翻译仅支持 DOCX，请勿上传 PDF、Excel 或其他格式' })
+      res.status(400).json({ error: '文件翻译仅支持 DOCX 和 PDF，请勿上传 Excel、旧版 DOC 或其他格式' })
       return
     }
     const direction = req.body?.direction === 'zh-en' ? 'zh-en' : 'en-zh'
@@ -626,7 +627,7 @@ app.post('/api/translate/document', upload.single('file'), async (req, res, next
       originalName: req.file.originalname,
       storedName: req.file.filename,
       stage: '文件已上传，等待翻译',
-      metadata: { direction,libraryId:reference.libraryId,libraryName:reference.libraryName,libraryIds:reference.libraryIds,libraryNames:reference.libraryNames,phase:'reading' },
+      metadata: { sourceFormat,direction,libraryId:reference.libraryId,libraryName:reference.libraryName,libraryIds:reference.libraryIds,libraryNames:reference.libraryNames,phase:'reading' },
       ownerId: req.user.id,
     })
     setImmediate(() => {
@@ -1819,20 +1820,35 @@ function failDocumentTask(id, error) {
 async function processTranslationDocumentTask(taskId,reference) {
   const task = getDocumentTask(taskId)
   if (!task) return
-  updateDocumentTask(taskId, { status: 'processing', progress: 3, stage: '正在读取 Word 文档' })
-  const sourceMarkdown = await extractDocxMarkdown(path.join(uploadDir, task.storedName))
-  if (!sourceMarkdown) throw new Error('Word 文档中没有提取到可翻译内容')
-
+  const sourceFormat=task.metadata?.sourceFormat||(path.extname(task.originalName).toLowerCase()==='.pdf'?'pdf':'docx')
   const direction = task.metadata?.direction === 'zh-en' ? 'zh-en' : 'en-zh'
   reference=reference||glossary.snapshot(task.metadata?.libraryIds ?? task.metadata?.libraryId)
+  const metadata={sourceFormat,direction,libraryId:reference.libraryId,libraryName:reference.libraryName,libraryIds:reference.libraryIds,libraryNames:reference.libraryNames}
+  updateDocumentTask(taskId,{status:'processing',progress:3,stage:sourceFormat==='pdf'?'正在读取 PDF':'正在读取 Word 文档',metadata:{...metadata,phase:'reading'}})
+  const diagnostics=[]
+  let sourceMarkdown
+  if(sourceFormat==='pdf') {
+    const extracted=await extractPdfMarkdown(path.join(uploadDir,task.storedName),{
+      purposePrefix:'translation-pdf',
+      onProgress:({completedPages,totalPages,pageNumber,mode})=>updateDocumentTask(taskId,{
+        progress:6+Math.floor(completedPages/totalPages*24),
+        stage:completedPages===totalPages?`已识别全部 ${totalPages} 页，准备翻译`:`第 ${pageNumber}/${totalPages} 页：${mode==='image'?'正在进行图像识别':'正在整理原文结构'}`,
+        metadata:{...metadata,totalPages,completedPages,phase:'recognizing'},
+      }),
+    })
+    sourceMarkdown=extracted.markdown
+    diagnostics.push(...extracted.diagnostics)
+    Object.assign(metadata,{totalPages:extracted.totalPages,completedPages:extracted.totalPages,recognition:extracted.recognition})
+  } else sourceMarkdown=await extractDocxMarkdown(path.join(uploadDir,task.storedName))
+  if (!sourceMarkdown) throw new Error(`${sourceFormat==='pdf'?'PDF':'Word'} 文档中没有提取到可翻译内容`)
   const glossaryMarkdown = reference.markdown
   const chunks = markdownDocumentChunks(sourceMarkdown, 6500)
   const translated = []
-  const diagnostics = []
+  const translationStart=sourceFormat==='pdf'?32:8
   updateDocumentTask(taskId, {
-    progress: 6,
+    progress: sourceFormat==='pdf'?32:6,
     stage: `已读取文档，准备翻译 ${chunks.length} 个片段`,
-    metadata: { direction,libraryId:reference.libraryId,libraryName:reference.libraryName,libraryIds:reference.libraryIds,libraryNames:reference.libraryNames,totalChunks: chunks.length,phase:'processing' },
+    metadata: {...metadata,totalChunks:chunks.length,phase:'processing'},
   })
 
   for (const [index, chunk] of chunks.entries()) {
@@ -1844,7 +1860,7 @@ async function processTranslationDocumentTask(taskId,reference) {
       purpose: `translation-document:${index + 1}/${chunks.length}`,
       onStage: ({ step, stage }) => {
         const completedStages = index * 3 + (step - 1)
-        const progress = Math.floor(8 + (completedStages / (chunks.length * 3)) * 68)
+        const progress = Math.floor(translationStart + (completedStages / (chunks.length * 3)) * (76-translationStart))
         updateDocumentTask(taskId, {
           progress,
           stage: `第 ${index + 1}/${chunks.length} 个片段：${stage}`,
@@ -1857,12 +1873,7 @@ async function processTranslationDocumentTask(taskId,reference) {
 
   const markdown = translated.join('\n\n')
   const resultName = `${Date.now()}-${crypto.randomUUID()}-translation.docx`
-  await finishFormattedDocumentTask({taskId,markdown,resultName,diagnostics,finalStage:'翻译、质检与排版完成，可以下载 Word',metadata:{
-      direction,
-      libraryId:reference.libraryId,libraryName:reference.libraryName,
-      libraryIds:reference.libraryIds,libraryNames:reference.libraryNames,
-      totalChunks: chunks.length,
-    }})
+  await finishFormattedDocumentTask({taskId,markdown,resultName,diagnostics,finalStage:'翻译、质检与排版完成，可以下载 Word',metadata:{...metadata,totalChunks:chunks.length}})
 }
 
 async function finishFormattedDocumentTask({taskId,markdown,resultName,finalStage,metadata,diagnostics=[]}) {
@@ -1955,40 +1966,46 @@ async function processPdfToWordTask(taskId) {
   const task = getDocumentTask(taskId)
   if (!task) return
   updateDocumentTask(taskId, { status: 'processing', progress: 3, stage: '正在读取 PDF',metadata:{phase:'reading'} })
-  const filePath = path.join(uploadDir, task.storedName)
+  const extracted=await extractPdfMarkdown(path.join(uploadDir,task.storedName),{
+    onProgress:({completedPages,totalPages,pageNumber,mode})=>updateDocumentTask(taskId,{
+      progress:10+Math.floor(completedPages/totalPages*66),
+      stage:completedPages===totalPages?`已完成全部 ${totalPages} 页`:`第 ${pageNumber}/${totalPages} 页：${mode==='image'?'正在进行图像识别':'正在整理原文结构'}`,
+      metadata:{totalPages,completedPages,phase:'processing'},
+    }),
+  })
+  const resultName = `${Date.now()}-${crypto.randomUUID()}-pdf-to-word.docx`
+  await finishFormattedDocumentTask({taskId,markdown:extracted.markdown,resultName,diagnostics:extracted.diagnostics,finalStage:'识别与排版完成，可以下载 Word',metadata:{totalPages:extracted.totalPages,completedPages:extracted.totalPages,recognition:extracted.recognition}})
+}
+
+async function extractPdfMarkdown(filePath,{onProgress,purposePrefix='pdf'}={}) {
   const parser = new PDFParse({ data: await fsp.readFile(filePath) })
   const diagnostics = []
+  const recognition={textPages:0,imagePages:0}
   try {
     const textResult = await parser.getText()
     const pages = textResult.pages || []
     if (!pages.length) throw new Error('PDF 中没有可处理的页面')
-    updateDocumentTask(taskId, {
-      progress: 10,
-      stage: `已读取 ${pages.length} 页，开始逐页识别与排版`,
-      metadata: { totalPages: pages.length,phase:'processing' },
-    })
-
     const renderedPages = []
     for (const [index, page] of pages.entries()) {
       const pageNumber = page.num || index + 1
       const sourceText = cleanText(page.text || '')
+      const mode=sourceText.length>=80?'text':'image'
+      await onProgress?.({completedPages:index,totalPages:pages.length,pageNumber,mode})
       let result
-      if (sourceText.length >= 80) {
+      if (mode==='text') {
+        recognition.textPages++
         result = await callSharedModel({
-          purpose: `pdf-layout:text-page-${pageNumber}`,
+          purpose: `${purposePrefix}-layout:text-page-${pageNumber}`,
           messages: [{ role: 'user', content: buildPdfTextPrompt(sourceText, pageNumber, pages.length) }],
           mockContent: `## 第 ${pageNumber} 页\n\n${sourceText}`,
         })
       } else {
-        updateDocumentTask(taskId, {
-          progress: Math.max(10, Math.floor(10 + (index / pages.length) * 66)),
-          stage: `第 ${pageNumber}/${pages.length} 页文本较少，正在进行图像识别`,
-        })
+        recognition.imagePages++
         const screenshot = await parser.getScreenshot({ partial: [pageNumber], desiredWidth: 1800 })
         const imageUrl = screenshot.pages?.[0]?.dataUrl
         if (!imageUrl) throw new Error(`第 ${pageNumber} 页图像渲染失败`)
         result = await callSharedModel({
-          purpose: `pdf-ocr:image-page-${pageNumber}`,
+          purpose: `${purposePrefix}-ocr:image-page-${pageNumber}`,
           messages: [
             {
               role: 'user',
@@ -2002,17 +2019,14 @@ async function processPdfToWordTask(taskId) {
         })
       }
       const normalized = await ensurePureMarkdown(result.content, pageNumber)
+      if(!normalized.content)throw new Error(`第 ${pageNumber} 页未识别出内容，请检查文档或模型返回`)
       diagnostics.push(result.diagnostics, ...normalized.diagnostics)
       renderedPages.push(normalized.content)
-      updateDocumentTask(taskId, {
-        progress: Math.floor(10 + ((index + 1) / pages.length) * 66),
-        stage: `已完成第 ${pageNumber}/${pages.length} 页`,
-      })
+      await onProgress?.({completedPages:index+1,totalPages:pages.length,pageNumber,mode})
     }
 
     const markdown = renderedPages.join('\n\n---\n\n')
-    const resultName = `${Date.now()}-${crypto.randomUUID()}-pdf-to-word.docx`
-    await finishFormattedDocumentTask({taskId,markdown,resultName,diagnostics,finalStage:'识别与排版完成，可以下载 Word',metadata:{totalPages:pages.length}})
+    return {markdown,diagnostics,totalPages:pages.length,recognition}
   } finally {
     await parser.destroy?.()
   }
@@ -2082,10 +2096,11 @@ async function processStandardTask(taskId, assistantId) {
 
 function buildPdfTextPrompt(text, pageNumber, totalPages) {
   return [
-    '你是专业的 PDF 转 Word 文档识别与排版助手。',
+    '你是专业的 PDF 文档识别与结构整理助手。',
     `以下是第 ${pageNumber}/${totalPages} 页提取出的文本。请纠正明显的断行和识别错误，并恢复标题、段落、编号、列表、表格和公式结构。`,
     '只输出该页整理后的 Markdown 源文本。所有表格必须使用 Markdown 管道表格；单元格内换行允许 <br>，不要输出其他 HTML/XML 标签，不要用代码围栏包裹整篇内容，不要输出图片占位链接。',
     '不得总结、删减或编造内容；数值、单位、公式和专有名词必须忠于原文。',
+    '此阶段只识别原文并整理结构，不进行翻译，保留原文语言。',
     text,
   ].join('\n\n')
 }
@@ -2096,6 +2111,7 @@ function buildPdfImagePrompt(pageNumber, totalPages) {
     '输出纯 Markdown 源文本，保留标题、段落、编号、列表、表格、公式、数值和单位。',
     '所有表格必须使用 Markdown 管道表格；单元格内换行允许 <br>，不要输出其他 HTML/XML 标签，不要用代码围栏包裹整篇内容，不要虚构图片或链接。',
     '扫描质量可能较差；无法确认的字用〔无法辨认〕标记，不得猜测或补写，不要输出解释和思考过程。',
+    '此阶段只识别原文并整理结构，不进行翻译，保留原文语言。',
   ].join('\n')
 }
 
