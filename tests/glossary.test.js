@@ -4,9 +4,15 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import initSqlJs from 'sql.js'
-import {createGlossaryStore,glossaryLibrary} from '../server/glossary.js'
+import {createGlossaryStore,glossaryLibrary,glossarySelection} from '../server/glossary.js'
 
 const SQL=await initSqlJs()
+test('Multiple library selections are validated, canonical, unique and default to general',()=>{
+  assert.deepEqual(glossarySelection(['testing','general','testing']).map(item=>item.id),['general','testing'])
+  assert.deepEqual(glossarySelection('["processing","finished"]').map(item=>item.id),['finished','processing'])
+  for(const value of [undefined,null,'',[],'[]'])assert.deepEqual(glossarySelection(value).map(item=>item.id),['general'])
+  for(const value of [['unknown'],[null],[''],{},'[oops',Array(5).fill('general')])assert.throws(()=>glossarySelection(value))
+})
 test('Four-library migration preserves legacy terms, IDs, notes, duplicates and timestamps',async(t)=>{
   const storageDir=await fs.mkdtemp(path.join(os.tmpdir(),'aizhushou-glossary-'))
   t.after(()=>fs.rm(storageDir,{recursive:true,force:true}))
@@ -61,6 +67,12 @@ test('Duplicates warn, show complete pairs, allow explicit override, and remain 
   const mirrored=await fs.readFile(path.join(storageDir,'glossaries','finished.md'),'utf8')
   assert.ok(mirrored.includes('changed reference'))
   assert.ok(!(await fs.readFile(path.join(storageDir,'glossary.md'),'utf8')).includes('changed reference'))
+  const combined=store.snapshot(['finished','general'])
+  assert.deepEqual(combined.libraryIds,['general','finished']);assert.equal(combined.libraryId,null)
+  assert.ok(combined.markdown.includes('# 通用术语库'));assert.ok(combined.markdown.includes('# 成品检查术语库'))
+  assert.ok(!combined.markdown.includes('# 理化检验术语库'))
+  store.mutate({action:'create',libraryId:'general',items:[{zhTerm:'新项目',enTerm:'new item'}]})
+  assert.ok(!combined.markdown.includes('new item'))
 })
 
 test('Batch operations validate all rows before writes, check final edited values and enforce category ownership',async(t)=>{

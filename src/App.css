@@ -279,6 +279,83 @@ h2 {
   gap: 12px;
 }
 
+.translationLibraryPicker {
+  position: relative;
+  flex: 0 1 450px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.libraryPickerTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+}
+
+.libraryPickerTrigger span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.libraryPickerTrigger svg {
+  flex: 0 0 auto;
+}
+
+.libraryPickerOptions {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 15;
+  width: 100%;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(35, 73, 118, 0.15);
+}
+
+.translationLibraryBar .libraryPickerOption {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.libraryPickerOption:hover {
+  background: var(--blue-soft);
+}
+
+.libraryPickerOption input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--blue);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .assistantCard {
   position: relative;
   display: grid;
@@ -1140,6 +1217,45 @@ h2 {
   padding: 8px;
   vertical-align: top;
 }
+
+.documentDownloads {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.documentTaskSteps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.documentTaskSteps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.documentTaskSteps svg { flex: 0 0 auto; }
+.documentTaskSteps .done { color: var(--green); }
+.documentTaskSteps .current { color: var(--blue); }
+.layoutWarning { color: var(--amber); font-size: 12px; line-height: 1.7; margin-top: 10px; }
+.documentBody .formattedDocument { font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.documentBody .formattedDocument h1 { font-size: 24px; line-height: 1.4; margin: 0 0 16px; }
+.documentBody .formattedDocument h2 { font-size: 20px; line-height: 1.5; padding: 0; border: 0; background: none; margin: 18px 0 10px; }
+.documentBody .formattedDocument h3 { font-size: 17px; margin: 16px 0 8px; }
+.documentBody .formattedDocument h4,.documentBody .formattedDocument h5,.documentBody .formattedDocument h6 { font-size: 15px; margin: 12px 0 8px; }
+.documentBody .formattedDocument th { background: #f1f5f9; text-align: left; }
+.documentBody .formattedDocument td p { margin-bottom: 0; }
+.documentBody .formattedDocument pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; background: #f4f7fa; }
+.documentBody .formattedDocument blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--line-strong); }
+@media(max-width:760px){.documentTaskSteps{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.documentTaskSteps li{font-size:11px}.documentDownloads{width:100%}.translationLibraryPicker{flex:1;min-width:0}}
 
 .adminLocked {
   display: grid;

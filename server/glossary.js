@@ -16,6 +16,18 @@ export function glossaryLibrary(value) {
   if(!library)throw failure('请选择有效的术语库')
   return library
 }
+export function glossarySelection(value) {
+  let ids=value
+  if(typeof ids==='string'&&ids.trim().startsWith('[')) {
+    try {ids=JSON.parse(ids)} catch {throw failure('术语库选择格式不正确')}
+  }
+  if(ids===undefined||ids===null||ids===''||(Array.isArray(ids)&&!ids.length))ids=['general']
+  if(!Array.isArray(ids))ids=[ids]
+  if(ids.length>glossaryLibraries.length)throw failure('最多选择四类术语库')
+  if(ids.some(id=>typeof id!=='string'||!id))throw failure('请选择有效的术语库')
+  const selected=new Set(ids.map(id=>glossaryLibrary(id).id))
+  return glossaryLibraries.filter(library=>selected.has(library.id))
+}
 export function validateGlossaryTerm(value) {
   if(!value||typeof value.zhTerm!=='string'||typeof value.enTerm!=='string'||(value.note!==undefined&&typeof value.note!=='string'))throw failure('中文术语和英文术语均不能为空')
   const term={zhTerm:value.zhTerm.trim(),enTerm:value.enTerm.trim(),note:(value.note||'').trim()}
@@ -59,7 +71,13 @@ export function createGlossaryStore({db,saveDatabase,storageDir}) {
   const select='SELECT id,library_id AS libraryId,zh_term AS zhTerm,en_term AS enTerm,note,created_at AS createdAt,updated_at AS updatedAt FROM glossary_terms'
   function terms(libraryId='general'){const library=glossaryLibrary(libraryId);return all(`${select} WHERE library_id=? ORDER BY id`,[library.id])}
   function catalog(){return glossaryLibraries.map(item=>({...item,count:get('SELECT COUNT(*) AS count FROM glossary_terms WHERE library_id=?',[item.id]).count}))}
-  function snapshot(libraryId){const library=glossaryLibrary(libraryId),rows=terms(library.id);return {libraryId:library.id,libraryName:library.name,hasTerms:rows.length>0,markdown:glossaryMarkdown(rows,library),capturedAt:new Date().toISOString()}}
+  function snapshot(selection){
+    const selected=glossarySelection(selection),references=selected.map(library=>({library,rows:terms(library.id)}))
+    return {libraryId:selected.length===1?selected[0].id:null,libraryName:selected.map(library=>library.name).join('、'),
+      libraryIds:selected.map(library=>library.id),libraryNames:selected.map(library=>library.name),
+      libraries:references.map(({library,rows})=>({...library,hasTerms:rows.length>0})),
+      hasTerms:references.some(({rows})=>rows.length>0),markdown:references.map(({library,rows})=>glossaryMarkdown(rows,library)).join('\n\n'),capturedAt:new Date().toISOString()}
+  }
   function syncMirrors(){
     try {
       const directory=path.join(storageDir,'glossaries');fs.mkdirSync(directory,{recursive:true})

@@ -797,14 +797,15 @@ function TranslateView({ setNotice }) {
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [libraryId,setLibraryId]=useState('general')
+  const [libraryIds,setLibraryIds]=useState(['general'])
   const [libraries,setLibraries]=useState(glossaryOptions)
   const [libraryReady,setLibraryReady]=useState(false)
   const [documentBusy,setDocumentBusy]=useState(false)
   const chatRailRef = useRef(null)
   useEffect(()=>{const controller=new AbortController();api('/api/glossary-libraries',{signal:controller.signal}).then(data=>{setLibraries(data.items);setLibraryReady(true)}).catch(error=>{if(!controller.signal.aborted)setNotice(error.message)});return()=>controller.abort()},[setNotice])
   const processing=loading||documentBusy
-  const selectedLibrary=libraries.find(item=>item.id===libraryId)
+  const effectiveLibraryIds=libraryIds.length?libraryIds:['general']
+  const emptyLibraries=libraries.filter(item=>effectiveLibraryIds.includes(item.id)&&item.hasTerms===false)
 
   useEffect(() => {
     const rail = chatRailRef.current
@@ -829,7 +830,7 @@ function TranslateView({ setNotice }) {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, direction,libraryId }),
+        body: JSON.stringify({ text, direction,libraryIds }),
       })
       if (!response.ok) {
         const errorText = await response.text()
@@ -894,9 +895,9 @@ function TranslateView({ setNotice }) {
         </div>
       </div>
 
-      <div className="translationLibraryBar"><BookOpenCheck size={17}/><label>术语库<select aria-label="术语库" value={libraryId} disabled={!libraryReady||processing} onChange={event=>setLibraryId(event.target.value)}>{libraries.map(item=><option value={item.id} key={item.id}>{item.name}</option>)}</select></label></div>
+      <div className="translationLibraryBar"><BookOpenCheck size={17}/><span>术语库</span><TranslationLibraryPicker libraries={libraries} value={libraryIds} onChange={setLibraryIds} disabled={!libraryReady||processing}/></div>
       <div className="translationTermSource"><FileText size={16}/><span>所用术语均来源于WST标准体系文件：《与产品相关的术语集（SS020101）》。</span><a href="/api/translation/terminology-source.pdf" target="_blank" rel="noopener noreferrer" onClick={event=>{event.preventDefault();window.open(event.currentTarget.href,'_blank','noopener,noreferrer,width=1200,height=900')}}>点击查看<ExternalLink size={14}/></a></div>
-      {selectedLibrary?.hasTerms===false&&<p className="translationLibraryEmpty">当前术语库暂无条目，本次将不使用术语参考。</p>}
+      {emptyLibraries.length>0&&<p className="translationLibraryEmpty">{emptyLibraries.map(item=>item.name).join('、')}暂无条目。</p>}
 
       {mode === 'chat' ? (
         <div className="translationChat">
@@ -939,13 +940,13 @@ function TranslateView({ setNotice }) {
             endpoint="/api/translate/document"
             accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             emptyLabel="选择待翻译 Word 文档"
-            fileHint="系统将保留文本层级并输出 Markdown 格式的 Word 结果"
+            fileHint="支持段落与表格，单文件最大 200 MB"
             actionLabel="开始翻译"
             workingLabel="正在翻译"
             icon={<Languages size={30} />}
-            resultTitle="Markdown 翻译结果"
+            resultTitle="排版结果预览"
             setNotice={setNotice}
-            extraFields={{ direction,libraryId }}
+            extraFields={{ direction,libraryIds:JSON.stringify(libraryIds) }}
             onProcessingChange={setDocumentBusy}
             blocked={!libraryReady}
             embedded
@@ -954,6 +955,27 @@ function TranslateView({ setNotice }) {
       )}
     </section>
   )
+}
+
+function TranslationLibraryPicker({ libraries, value, onChange, disabled }) {
+  const [open,setOpen]=useState(false)
+  const root=useRef(null),trigger=useRef(null)
+  useEffect(()=>{
+    if(!open)return
+    const outside=event=>{if(!root.current?.contains(event.target))setOpen(false)}
+    const escape=event=>{if(event.key==='Escape'){setOpen(false);trigger.current?.focus()}}
+    document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape)
+    return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape)}
+  },[open])
+  useEffect(()=>{if(disabled)setOpen(false)},[disabled])
+  const selected=libraries.filter(item=>value.includes(item.id))
+  const label=selected.length===0?'通用术语库（默认）':selected.length===1?selected[0].name:`已选 ${selected.length} 类术语库`
+  return <div className="translationLibraryPicker" ref={root}>
+    <button className="libraryPickerTrigger" type="button" ref={trigger} disabled={disabled} aria-label="选择术语库" aria-expanded={open} title={selected.map(item=>item.name).join('、')||'通用术语库（默认）'} onClick={()=>setOpen(current=>!current)}><span>{label}</span><ChevronDown size={16}/></button>
+    {open&&<fieldset className="libraryPickerOptions" aria-label="术语库"><legend className="visuallyHidden">术语库</legend>
+      {libraries.map(item=><label className="libraryPickerOption" key={item.id}><input type="checkbox" aria-label={item.name} checked={value.includes(item.id)} onChange={event=>onChange(event.target.checked?[...value,item.id]:value.filter(id=>id!==item.id))}/><span>{item.name}</span></label>)}
+    </fieldset>}
+  </div>
 }
 
 function DirectionControl({ direction, setDirection, disabled = false }) {
@@ -973,7 +995,7 @@ function PdfToWordView({ setNotice }) {
   return (
     <DocumentTaskView
       title="PDF转word助手"
-      description="上传 PDF 后，系统会逐页识别内容并恢复标题、段落、列表、表格与公式结构。"
+      description="上传 PDF 后，系统逐页识别内容、检查排版并生成可编辑的 Word 文档。"
       endpoint="/api/pdf-to-word"
       accept=".pdf,application/pdf"
       emptyLabel="选择待转换 PDF"
@@ -981,7 +1003,7 @@ function PdfToWordView({ setNotice }) {
       actionLabel="开始转换"
       workingLabel="正在转换"
       icon={<ScanText size={30} />}
-      resultTitle="转换内容预览"
+      resultTitle="排版结果预览"
       setNotice={setNotice}
     />
   )
@@ -1127,6 +1149,8 @@ function DocumentTaskView({
             <b>{task.progress}%</b>
           </div>
           <div className="progressTrack"><i style={{ width: `${task.progress}%` }} /></div>
+          {task.metadata?.phase&&['pdf-to-word','translation-document'].includes(task.type)&&<DocumentTaskSteps task={task}/>}
+          {task.metadata?.layoutModel?.warnings?.map((warning,index)=><p className="layoutWarning" key={index}>{warning}</p>)}
           {task.error && <p className="formError">{task.error}</p>}
           {task.metadata?.thinkingVerification && (
             <p className="thinkingStatus">模型检查：{task.metadata.thinkingVerification}</p>
@@ -1138,15 +1162,24 @@ function DocumentTaskView({
         <>
           <div className="translationMeta">
             <span><FileText size={16} /> {task.originalName}</span>
-            <a className="downloadButton" href={task.downloadUrl}>
-              <Download size={17} /> 保存为 Word
-            </a>
+            <div className="documentDownloads"><a className="downloadButton" href={task.downloadUrl}>
+              <Download size={17} /> {task.metadata?.formattedResult?'下载排版 Word':'保存为 Word'}
+            </a>{task.markdownDownloadUrl&&<a className="ghost" href={task.markdownDownloadUrl}><FileText size={16}/>Markdown 版</a>}</div>
           </div>
           <DocumentPane title={resultTitle} html={task.previewHtml} />
         </>
       )}
     </section>
   )
+}
+
+function DocumentTaskSteps({task}) {
+  const phases=['reading','processing','layout-model','layout','generating']
+  const labels=['读取文档',task.type==='pdf-to-word'?'逐页识别':'翻译与校订','模型排版检查','恢复表格与段落','生成 Word']
+  const current=task.metadata.phase==='completed'?phases.length:Math.max(0,phases.indexOf(task.metadata.phase))
+  return <ol className="documentTaskSteps" aria-label="文档处理步骤">{labels.map((label,index)=><li className={index<current?'done':index===current?'current':''} aria-current={index===current?'step':undefined} key={label}>
+    {index<current?<CheckCircle2 size={15}/>:index===current?<Settings2 size={15} className={task.status==='processing'?'spinning':''}/>:<Square size={13}/>}<span>{label}</span>
+  </li>)}</ol>
 }
 
 function DocumentPane({ title, html }) {
