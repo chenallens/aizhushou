@@ -13,7 +13,8 @@ import {publicKnowledgeAssistants, visibleKnowledgeAssistants} from '../server/k
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const companyName = '西部超导材料科技股份有限公司'
-const companies = [{id:'100',name:companyName},{id:'200',name:'测试子公司'}]
+const wireCompanyName = '西安聚能超导线材科技有限公司'
+const companies = [{id:'100',name:companyName},{id:'200',name:'测试子公司'},{id:'500',name:wireCompanyName}]
 const departments = [
   {id:'189',name:'制造一厂',companyId:'100',parentId:null},
   {id:'melt',name:'熔炼车间',companyId:'100',parentId:'189'},
@@ -28,6 +29,10 @@ const departments = [
   {id:'other-one',name:'制造一厂',companyId:'200',parentId:null},
   {id:'150',name:'高管',companyId:'200',parentId:null},
   {id:'other-it',name:'信息技术部',companyId:'200',parentId:null},
+  {id:'wire-office',name:'综合办公室',companyId:'500',parentId:null},
+  {id:'wire-team',name:'办公室班组',companyId:'500',parentId:'wire-office'},
+  {id:'243',name:'高管',companyId:'500',parentId:null},
+  {id:'wire-it',name:'信息技术部',companyId:'500',parentId:null},
 ]
 const organization = organizationIndex(companies,departments)
 const user = (departmentId, companyId='100', extra={}) => ({companyId,departmentId,builtin:false,isSuperAdmin:false,...extra})
@@ -49,6 +54,18 @@ test('Knowledge catalog follows exact company and actual department ancestry, no
   assert.deepEqual(ids(user('174','200')),[])
   assert.deepEqual(ids(user(null)),[])
   assert.deepEqual(ids(null),[])
+})
+
+test('Wire company-wide access grants only plant four and preserves primary-company policy',()=>{
+  for(const departmentId of ['wire-office','wire-team','243','wire-it',null])assert.deepEqual(ids(user(departmentId,'500')),['ragflow'])
+  assert.deepEqual(ids(user('melt','500')),[])
+  const renamed=organizationIndex([{id:'500',name:'另一家公司'}],departments.filter(item=>item.companyId==='500'))
+  assert.deepEqual(visibleKnowledgeAssistants(user('wire-office','500'),renamed),[])
+  const sameName=organizationIndex([{id:'200',name:wireCompanyName}],departments.filter(item=>item.companyId==='200'))
+  assert.deepEqual(visibleKnowledgeAssistants(user('150','200'),sameName),[])
+  assert.deepEqual(ids(user('four-team')),['ragflow'])
+  assert.deepEqual(ids(user('174')),['qa','ragflow'])
+  assert.deepEqual(ids(user('193')),['qa','ragflow'])
 })
 
 test('Only the built-in super administrator bypasses department scope; management roles do not grant chat access',()=>{
@@ -83,14 +100,15 @@ test('Knowledge HTTP authorization, feedback snapshots and additive legacy migra
   const hash='knowledge-salt:'+crypto.scryptSync('knowledge-test-password','knowledge-salt',32).toString('hex')
   const fixtures=[['one','一厂测试员工','melt-team','100'],['four','四厂测试员工','four-team','100'],
     ['it','信息部测试员工','it-team','100'],['executive','高管测试员工','193','100'],
-    ['two','二厂测试员工','190','100'],['subsidiary','子公司测试员工','150','200']]
+    ['two','二厂测试员工','190','100'],['subsidiary','子公司测试员工','150','200'],
+    ['wire','线材办公室测试员工','wire-team','500'],['wire-executive','线材高管测试员工','243','500'],['wire-unassigned','线材公司直属测试员工',null,'500']]
   for(const [id,name,departmentId,companyId] of fixtures)db.run(`INSERT INTO users(id,employee_id,username,name,department_id,company_id,password_hash,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?)`,['mdm:'+id,id,id,name,departmentId,companyId,hash,'old','old'])
   db.run("INSERT INTO user_roles VALUES('mdm:one','glossary_admin','old'),('mdm:subsidiary','super_admin','old')")
   const storage=await fs.mkdtemp(path.join(os.tmpdir(),'aizhushou-knowledge-access-'))
   await fs.writeFile(path.join(storage,'aizhushou.sqlite'),Buffer.from(db.export()));db.close()
   const reservation=http.createServer();await new Promise(resolve=>reservation.listen(0,'127.0.0.1',resolve));const port=reservation.address().port;await new Promise(resolve=>reservation.close(resolve))
   const portalFixture=http.createServer((req,res)=>{
-    const account={'portal-four':'four','portal-it':'it','portal-subsidiary':'subsidiary'}[new URL(req.url,'http://localhost').searchParams.get('ticket')]
+    const account={'portal-four':'four','portal-it':'it','portal-subsidiary':'subsidiary','portal-wire':'wire'}[new URL(req.url,'http://localhost').searchParams.get('ticket')]
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify(account?{data:account}:{code:500,data:null}))
   })
   await new Promise(resolve=>portalFixture.listen(0,'127.0.0.1',resolve))
@@ -111,18 +129,18 @@ test('Knowledge HTTP authorization, feedback snapshots and additive legacy migra
   const clients={}
   for(const [id] of fixtures){const client={};clients[id]=client;await request('/api/login',{method:'POST',client,body:{username:id,password:'knowledge-test-password'}})}
   const admin={};await request('/api/login',{method:'POST',client:admin,body:{username:'admin',password:'knowledge-test-admin'}})
-  for(const [id,expected] of [['one',['qa']],['four',['ragflow']],['it',['qa','ragflow']],['executive',['qa','ragflow']],['two',[]],['subsidiary',[]]]){
+  for(const [id,expected] of [['one',['qa']],['four',['ragflow']],['it',['qa','ragflow']],['executive',['qa','ragflow']],['two',[]],['subsidiary',[]],['wire',['ragflow']],['wire-executive',['ragflow']],['wire-unassigned',['ragflow']]]){
     const response=await request('/api/me',{client:clients[id]});assert.equal(response.headers.get('Cache-Control'),'no-store')
     assert.deepEqual((await response.json()).knowledgeAssistants.map(item=>item.id),expected)
   }
   assert.deepEqual((await(await request('/api/me',{client:admin})).json()).knowledgeAssistants.map(item=>item.id),['qa','ragflow'])
-  for(const [ticket,expected] of [['portal-four',['ragflow']],['portal-it',['qa','ragflow']],['portal-subsidiary',[]]]){
+  for(const [ticket,expected] of [['portal-four',['ragflow']],['portal-it',['qa','ragflow']],['portal-subsidiary',[]],['portal-wire',['ragflow']]]){
     const portalClient={};await request('/api/sso/login?ticket='+ticket,{client:portalClient})
     const profile=await(await request('/api/me',{client:portalClient})).json()
     assert.equal(profile.authMethod,'portal');assert.deepEqual(profile.knowledgeAssistants.map(item=>item.id),expected)
   }
   await request('/api/qa/chat',{method:'POST',body:{messages:[{role:'user',content:'test'}]},expected:401})
-  for(const id of ['four','two','subsidiary'])for(const endpoint of ['/api/qa/chat','/api/qa/chat/stream','/api/usage/qa']){
+  for(const id of ['four','two','subsidiary','wire','wire-executive','wire-unassigned'])for(const endpoint of ['/api/qa/chat','/api/qa/chat/stream','/api/usage/qa']){
     const response=await request(endpoint,{client:clients[id],method:'POST',body:{messages:[{role:'user',content:'test'}],companyId:'100',departmentId:'189',userId:'one',requestId:'forged'},expected:403})
     assert.equal((await response.json()).code,'KNOWLEDGE_ASSISTANT_FORBIDDEN')
   }
@@ -133,8 +151,10 @@ test('Knowledge HTTP authorization, feedback snapshots and additive legacy migra
   }
   const statsBefore=await(await request('/api/stats')).json();assert.equal(statsBefore.qaNativeUses,0);assert.equal(statsBefore.ragflowUses,0)
   const native=await request('/api/qa/chat/stream',{client:clients.one,method:'POST',body:{messages:[{role:'user',content:'native test'}]}});assert.ok((await native.text()).includes('"type":"done"'))
-  const ragflow=await request('/api/ragflow/chat/stream',{client:clients.four,method:'POST',body:{question:'ragflow test'}});assert.ok((await ragflow.text()).includes('"type":"done"'))
-  const opened=await request('/api/assistants/ragflow/open?count=0',{client:clients.four,expected:302,redirect:'manual'});assert.ok(opened.headers.get('Location').startsWith('http://ragflow.test/'))
+  for(const id of ['four','wire','wire-executive','wire-unassigned']){
+    const ragflow=await request('/api/ragflow/chat/stream',{client:clients[id],method:'POST',body:{question:'ragflow test'}});assert.ok((await ragflow.text()).includes('"type":"done"'))
+    const opened=await request('/api/assistants/ragflow/open?count=0',{client:clients[id],expected:302,redirect:'manual'});assert.ok(opened.headers.get('Location').startsWith('http://ragflow.test/'))
+  }
   for(const id of ['it','executive'])for(const assistant of ['qa','ragflow'])await request('/api/usage/'+assistant,{client:clients[id],method:'POST',body:{requestId:`${id}-${assistant}`}})
   await request('/api/feedback',{client:clients.one,method:'POST',body:{content:'身份快照反馈',authorName:'伪造姓名',authorDepartmentName:'制造四厂',authorUserId:'four'}})
   const feedback=(await(await request('/api/feedback')).json()).items
