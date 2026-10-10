@@ -272,6 +272,13 @@ h2 {
   gap: 16px;
 }
 
+.knowledgeEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .assistantCard {
   position: relative;
   display: grid;
@@ -439,6 +446,35 @@ h2 {
 .feedbackMain {
   display: grid;
   gap: 7px;
+}
+
+.feedbackMeta,
+.feedbackAuthor {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.feedbackMeta {
+  justify-content: space-between;
+}
+
+.feedbackAuthor {
+  flex: 1 1 260px;
+  overflow-wrap: anywhere;
+}
+
+.feedbackAuthor strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.feedbackAuthor svg {
+  flex: 0 0 auto;
 }
 
 .feedbackMain time,

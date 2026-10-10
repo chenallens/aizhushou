@@ -27,6 +27,7 @@ import { Agent } from 'undici'
 import { callSharedModel, callSharedModelStream, readModelAudit } from './model-client.js'
 import { createPlatform } from './platform.js'
 import {createGlossaryStore} from './glossary.js'
+import {knowledgeAssistants} from './knowledge-assistants.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -106,7 +107,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'aizhushou', time: new Date().toISOString() })
 })
 
-app.get('/api/assistants/ragflow/open', (req, res) => {
+app.get('/api/assistants/ragflow/open', platform.requireKnowledgeAssistant('ragflow'), (req, res) => {
   const ragflowUrl = String(process.env.RAGFLOW_CHAT_URL || '').trim()
   let target
   try {
@@ -134,7 +135,10 @@ app.post('/api/visit', (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/api/usage/:assistant', (req, res) => {
+app.post('/api/usage/:assistant', (req,res,next)=>{
+  if (knowledgeAssistants.some(assistant=>assistant.id===req.params.assistant)) return platform.requireKnowledgeAssistant(req.params.assistant)(req,res,next)
+  next()
+}, (req, res) => {
   const map = {
     qa: 'qa_click',
     ragflow: 'ragflow_click',
@@ -156,7 +160,9 @@ app.get('/api/feedback', (req, res) => {
   const pageSize = 3
   const total = get('SELECT COUNT(*) AS count FROM feedback').count
   const rows = all(
-    `SELECT id, content, reply, created_at AS createdAt, replied_at AS repliedAt
+    `SELECT id, content, reply, created_at AS createdAt, replied_at AS repliedAt,
+       author_name AS authorName, author_department_name AS authorDepartmentName,
+       author_department_path AS authorDepartmentPath
      FROM feedback
      ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?`,
     [pageSize, (page - 1) * pageSize],
@@ -174,7 +180,10 @@ app.post('/api/feedback', platform.requireUser, (req, res) => {
     res.status(400).json({ error: '反馈内容不能超过 2000 字' })
     return
   }
-  run('INSERT INTO feedback (content, created_at) VALUES (?, ?)', [content, now()])
+  run(`INSERT INTO feedback (content, created_at, author_user_id, author_name, author_company_id,
+    author_department_id, author_department_name, author_department_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [content, now(), req.user.id, req.user.name, req.user.companyId || null,
+      req.user.departmentId || null, req.user.departmentName, req.user.departmentPath || req.user.departmentName])
   res.json({ ok: true, item: get('SELECT * FROM feedback ORDER BY id DESC LIMIT 1') })
 })
 
@@ -274,7 +283,7 @@ app.post('/api/glossaries', platform.requirePermission('glossary.manage'), uploa
   }
 })
 
-app.post('/api/qa/chat', async (req, res, next) => {
+app.post('/api/qa/chat', platform.requireKnowledgeAssistant('qa'), async (req, res, next) => {
   try {
     const messages = normalizeMessages(req.body)
     if (!messages.length) {
@@ -327,7 +336,7 @@ app.post('/api/qa/chat', async (req, res, next) => {
   }
 })
 
-app.post('/api/qa/chat/stream', async (req, res, next) => {
+app.post('/api/qa/chat/stream', platform.requireKnowledgeAssistant('qa'), async (req, res, next) => {
   try {
     const messages = normalizeMessages(req.body)
     if (!messages.length) {
@@ -381,7 +390,7 @@ app.post('/api/qa/chat/stream', async (req, res, next) => {
   }
 })
 
-app.post('/api/ragflow/chat/stream', async (req, res) => {
+app.post('/api/ragflow/chat/stream', platform.requireKnowledgeAssistant('ragflow'), async (req, res) => {
   const question = String(req.body?.question || '').trim()
   const requestedSessionId = normalizeRagflowSessionId(req.body?.sessionId)
   if (!question) {
@@ -808,7 +817,13 @@ function ensureSchema() {
       content TEXT NOT NULL,
       reply TEXT,
       created_at TEXT NOT NULL,
-      replied_at TEXT
+      replied_at TEXT,
+      author_user_id TEXT,
+      author_name TEXT,
+      author_company_id TEXT,
+      author_department_id TEXT,
+      author_department_name TEXT,
+      author_department_path TEXT
     );
 
     CREATE TABLE IF NOT EXISTS glossaries (
@@ -865,6 +880,17 @@ function ensureSchema() {
       updated_at TEXT NOT NULL
     );
   `)
+  const feedbackColumns = new Set(all('PRAGMA table_info(feedback)').map(column => column.name))
+  const missingAuthorColumns = ['author_user_id', 'author_name', 'author_company_id',
+    'author_department_id', 'author_department_name', 'author_department_path'].filter(name => !feedbackColumns.has(name))
+  if (missingAuthorColumns.length) {
+    if (get('SELECT COUNT(*) AS count FROM feedback').count) {
+      const backupDir = path.join(storageDir, 'backups')
+      fs.mkdirSync(backupDir, {recursive: true})
+      fs.writeFileSync(path.join(backupDir, `before-feedback-authors-${Date.now()}.sqlite`), Buffer.from(db.export()))
+    }
+    for (const name of missingAuthorColumns) db.run(`ALTER TABLE feedback ADD COLUMN ${name} TEXT`)
+  }
   for (const assistantId of ['standard-plant-1', 'standard-plant-2', 'standard-plant-3']) {
     db.run(
       `INSERT OR IGNORE INTO assistant_prompts (assistant_id, prompt, updated_at) VALUES (?, ?, ?)`,

@@ -8,6 +8,7 @@ import { createMdmSnapshotRecorder, readLatestMdmSnapshot } from './mdm-snapshot
 import { createUsageStats } from './usage-stats.js'
 import { organizationIndex } from './organization.js'
 import {createSsoClient,SsoError} from './sso-client.js'
+import {publicKnowledgeAssistants} from './knowledge-assistants.js'
 
 const scrypt = promisify(crypto.scrypt)
 const initialPassword = '123456'
@@ -171,13 +172,14 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     const assignedRoles = all('SELECT role_id FROM user_roles WHERE user_id = ? ORDER BY role_id', [row.id]).map(item=>item.role_id)
     const permissions = [...new Set(roles.filter(role=>assignedRoles.includes(role.id)).flatMap(role=>role.permissions))]
     const org=organization(),department=org.departmentMap.get(row.department_id),company=org.companyMap.get(row.company_id)
-    return {
+    const user = {
       id:row.id, username:row.username, name:row.name,
       departmentId:row.department_id, departmentName:row.builtin ? '系统账户' : get('SELECT name FROM departments WHERE id = ?', [row.department_id])?.name || '未归属部门',
       companyId:row.company_id,companyName:company?.name||null,departmentPath:department?.path||company?.name||null,topDepartmentId:row.top_department_id,
       roles:assignedRoles, permissions, mustChangePassword:Boolean(row.must_change_password), builtin:Boolean(row.builtin),
       isAdmin:permissions.length>0, isSuperAdmin:assignedRoles.includes('super_admin'),
     }
+    return {...user, knowledgeAssistants:publicKnowledgeAssistants(user,org)}
   }
 
   function attachUser(req,_res,next) {
@@ -200,6 +202,16 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
   function requirePermission(permission) {
     return (req,res,next)=>requireUser(req,res,()=>{
       if (!req.user.permissions.includes(permission)) { res.status(403).json({error:'没有此操作的权限'}); return }
+      next()
+    })
+  }
+
+  function requireKnowledgeAssistant(id) {
+    return (req,res,next)=>requireUser(req,res,()=>{
+      if (!req.user.knowledgeAssistants.some(assistant=>assistant.id===id)) {
+        res.status(403).json({error:'当前公司或部门无权使用此知识助手',code:'KNOWLEDGE_ASSISTANT_FORBIDDEN'})
+        return
+      }
       next()
     })
   }
@@ -368,7 +380,7 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
         res.status(failure.status).json({error:failure.message,code:failure.code,...(failure.code==='SSO_USER_NOT_FOUND'?{redirectUrl:sso.forbiddenUrl}:{})})
       } finally {if(reserved)pendingSsoTickets.delete(ticketHash)}
     })
-    app.get('/api/me',(req,res)=>res.json(req.user ? { ...req.user,authenticated:true } : {authenticated:false,isAdmin:false,isSuperAdmin:false,roles:[],permissions:[]}))
+    app.get('/api/me',(req,res)=>res.set('Cache-Control','no-store').json(req.user ? { ...req.user,authenticated:true } : {authenticated:false,isAdmin:false,isSuperAdmin:false,roles:[],permissions:[],knowledgeAssistants:[]}))
     app.post('/api/login',async(req,res)=>{
       const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'')
       if (username.length>200 || password.length>256) {res.status(400).json({error:'账号或密码长度不正确'});return}
@@ -461,5 +473,5 @@ export async function createPlatform({ db, saveDatabase, session, storageDir }) 
     setInterval(tick,60_000).unref()
   }
 
-  return {store:new SqliteSessionStore(),attachUser,requireUser,requirePermission,registerRoutes,recordEvent,startSchedules}
+  return {store:new SqliteSessionStore(),attachUser,requireUser,requirePermission,requireKnowledgeAssistant,registerRoutes,recordEvent,startSchedules}
 }

@@ -36,8 +36,9 @@ import { Pagination, PermissionsCenter, UsageStatistics } from './PlatformViews.
 import GlossaryManager from './GlossaryManager.jsx'
 import {glossaryOptions} from './glossary-options.js'
 
-const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: false, permissions: [], roles: [] }
+const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: false, permissions: [], roles: [], knowledgeAssistants: [] }
 const assistantUsageTypes = { qa: 'qa', ragflow: 'ragflow', translate: 'translation', pdf: 'pdf', standard1: 'standard', standard2: 'standard', standard3: 'standard' }
+const knowledgeIcons = {bot: Bot, database: Database}
 
 function App() {
   return /^\/sso\/login\/?$/.test(window.location.pathname)?<SsoLoginView/>:<Workbench/>
@@ -127,10 +128,25 @@ function Workbench() {
   async function openAssistant(nextView) {
     if (!me.authenticated) { setPendingView(nextView); setLoginOpen(true); return }
     if (me.mustChangePassword) { setPendingView(nextView); setPasswordOpen(true); return }
-    try { await enterAssistant(nextView) } catch (error) { setNotice(error.message) }
+    try {
+      const currentMe = ['knowledge', 'qa', 'ragflow'].includes(nextView) ? await refreshMe() : me
+      if (!currentMe.authenticated) { setPendingView(nextView); setLoginOpen(true); return }
+      if (currentMe.mustChangePassword) { setPendingView(nextView); setPasswordOpen(true); return }
+      await enterAssistant(nextView, currentMe)
+    } catch (error) { setNotice(error.message) }
   }
 
-  async function enterAssistant(nextView) {
+  async function enterAssistant(nextView, currentMe = me) {
+    const knowledge = currentMe.knowledgeAssistants || []
+    if (nextView === 'knowledge') {
+      if (knowledge.length !== 1) { setView('knowledge'); return }
+      nextView = knowledge[0].id
+    }
+    if (['qa', 'ragflow'].includes(nextView) && !knowledge.some(assistant => assistant.id === nextView)) {
+      setView('knowledge')
+      setNotice('当前公司或部门无权使用此知识助手')
+      return
+    }
     const usageType = assistantUsageTypes[nextView]
     if (usageType) await api(`/api/usage/${usageType}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: createUsageRequestId() }) })
     setView(nextView)
@@ -170,7 +186,7 @@ function Workbench() {
           <button className={view === 'translate' ? 'active' : ''} type="button" onClick={() => openAssistant('translate')}>
             <Languages size={17} /> 翻译
           </button>
-          <button className={['qa', 'ragflow'].includes(view) ? 'active' : ''} type="button" onClick={() => openAssistant('qa')}>
+          <button className={['knowledge', 'qa', 'ragflow'].includes(view) ? 'active' : ''} type="button" onClick={() => openAssistant('knowledge')}>
             <Bot size={17} /> 问答
           </button>
         </nav>
@@ -207,6 +223,7 @@ function Workbench() {
           feedbackPage={feedbackPage}
           onFeedbackPage={setFeedbackPage}
           isAdmin={me.isSuperAdmin}
+          user={me}
           onOpenAssistant={openAssistant}
           onReplySaved={() => setFeedbackRevision(value => value + 1)}
           setNotice={setNotice}
@@ -214,6 +231,7 @@ function Workbench() {
       )}
       {view === 'qa' && <QaView setNotice={setNotice} oaCode={oaCode} />}
       {view === 'ragflow' && <RagflowQaView setNotice={setNotice} />}
+      {view === 'knowledge' && <KnowledgeView user={me} onOpenAssistant={openAssistant} onBack={() => setView('home')} />}
       {view === 'translate' && <TranslateView setNotice={setNotice} />}
       {view === 'pdf' && <PdfToWordView setNotice={setNotice} />}
       {view === 'standard1' && <StandardView plant={1} setNotice={setNotice} />}
@@ -248,7 +266,7 @@ function Workbench() {
             setLoginOpen(false)
             const currentMe = await refreshMe()
             if (!currentMe.mustChangePassword && pendingView) {
-              await enterAssistant(pendingView)
+              await enterAssistant(pendingView, currentMe)
               setPendingView(null)
             }
             setNotice('已登录')
@@ -257,15 +275,15 @@ function Workbench() {
       )}
       {passwordOpen && me.authenticated && !me.builtin && <PasswordDialog required={me.mustChangePassword} onClose={me.mustChangePassword ? undefined : () => setPasswordOpen(false)} onLogout={logout} onSaved={async () => {
         setPasswordOpen(false)
-        await refreshMe()
-        if (pendingView) { await enterAssistant(pendingView); setPendingView(null) }
+        const currentMe = await refreshMe()
+        if (pendingView) { await enterAssistant(pendingView, currentMe); setPendingView(null) }
         setNotice('密码已修改')
       }} />}
     </main>
   )
 }
 
-function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdmin, onOpenAssistant, onReplySaved, setNotice }) {
+function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdmin, user, onOpenAssistant, onReplySaved, setNotice }) {
   return (
     <>
       <AccordionSection eyebrow="Standard Interpretation" title="标准解读助手">
@@ -319,26 +337,7 @@ function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdm
       </AccordionSection>
 
       <AccordionSection eyebrow="Knowledge Service" title="知识助手">
-        <div className="assistantGrid knowledgeAssistantGrid">
-          <button className="assistantCard qa" type="button" onClick={() => onOpenAssistant('qa')}>
-            <span className="assistantIcon"><Bot size={26} /></span>
-            <span>
-              <strong>制造一厂知识问答AI助手</strong>
-              <small>知识来源为云盘内相关文档。</small>
-            </span>
-          </button>
-          <button
-            className="assistantCard ragflow"
-            type="button"
-            onClick={() => onOpenAssistant('ragflow')}
-          >
-            <span className="assistantIcon"><Database size={26} /></span>
-            <span>
-              <strong>制造四厂知识问答助手</strong>
-              <small>知识来源为制造四厂 RAGFlow 知识库。</small>
-            </span>
-          </button>
-        </div>
+        <KnowledgeAssistantGrid user={user} onOpenAssistant={onOpenAssistant} />
       </AccordionSection>
 
       <UsageStatistics api={api} setNotice={setNotice} refreshKey={statsRevision} />
@@ -354,6 +353,28 @@ function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdm
         />
     </>
   )
+}
+
+function KnowledgeAssistantGrid({ user, onOpenAssistant }) {
+  const assistants = user.knowledgeAssistants || []
+  if (!user.authenticated) return <div className="knowledgeEmpty"><p className="empty">尚未登录</p><button className="ghost" type="button" onClick={() => onOpenAssistant('knowledge')}><LogIn size={17} />登录</button></div>
+  if (!assistants.length) return <p className="empty" role="status">当前部门暂无可用知识助手</p>
+  return <div className={`assistantGrid knowledgeAssistantGrid ${assistants.length === 1 ? 'singleAssistantGrid' : ''}`}>
+    {assistants.map(assistant => {
+      const Icon = knowledgeIcons[assistant.icon] || Bot
+      return <button className={`assistantCard ${assistant.theme}`} type="button" key={assistant.id} onClick={() => onOpenAssistant(assistant.id)}>
+        <span className="assistantIcon"><Icon size={26} /></span>
+        <span><strong>{assistant.title}</strong><small>{assistant.description}</small></span>
+      </button>
+    })}
+  </div>
+}
+
+function KnowledgeView({ user, onOpenAssistant, onBack }) {
+  return <section className="workspace knowledgeWorkspace">
+    <div className="sectionTitle"><div><p className="eyebrow">Knowledge Service</p><h2>知识助手</h2></div><button className="ghost" type="button" onClick={onBack}><ChevronLeft size={17} />返回首页</button></div>
+    <KnowledgeAssistantGrid user={user} onOpenAssistant={onOpenAssistant} />
+  </section>
 }
 
 function AccordionSection({ eyebrow, title, children }) {
@@ -407,7 +428,10 @@ function FeedbackBoard({ items, page, pagination, onPage, isAdmin, onReplySaved,
           <article className="feedbackItem" key={item.id}>
             <div className="feedbackMain">
               <p>{item.content}</p>
-              <time>{formatTime(item.createdAt)}</time>
+              <div className="feedbackMeta">
+                {item.authorName ? <span className="feedbackAuthor"><CircleUserRound size={15} /><strong>{item.authorName}</strong><span>{item.authorDepartmentPath || item.authorDepartmentName || '未归属部门'}</span></span> : <span className="feedbackAuthor">历史反馈，提交人未记录</span>}
+                <time>{formatTime(item.createdAt)}</time>
+              </div>
             </div>
             {item.reply && (
               <div className="replyBlock">

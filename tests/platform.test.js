@@ -193,9 +193,9 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
 
   await t.test('Usage idempotency and department snapshots survive personnel transfer',async()=>{
     const body={requestId:'unique-usage-request',departmentId:'p4',userId:'builtin:admin'}
-    await request('/api/usage/qa',{method:'POST',body,client:employee})
-    await request('/api/usage/qa',{method:'POST',body,client:employee})
-    assert.equal((await request(`/api/stats?period=month&key=${month}&departmentId=p1`)).qaNativeUses,1)
+    await request('/api/usage/translation',{method:'POST',body,client:employee})
+    await request('/api/usage/translation',{method:'POST',body,client:employee})
+    assert.equal((await request(`/api/stats?period=month&key=${month}&departmentId=p1`)).translationUses,1)
     await loginEmployee('oa1002',otherEmployee)
     employees=employees.filter(item=>item.employeeId!=='e2').map(item=>item.employeeId==='e1'?{...item,name:'张明新姓名',deptId:'p2',deptTopId:'p2'}:item)
     assert.equal((await synchronize()).status,'completed')
@@ -204,9 +204,9 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
     assert.equal(updated.mustChangePassword,false)
     assert.ok(updated.roles.includes('glossary_admin'))
     assert.equal((await request('/api/me',{client:otherEmployee})).authenticated,false)
-    await request('/api/usage/qa',{method:'POST',body:{requestId:'post-transfer-request'},client:employee})
-    assert.equal((await request(`/api/stats?departmentId=p1&key=${month}`)).qaNativeUses,1)
-    assert.equal((await request(`/api/stats?departmentId=p2&key=${month}`)).qaNativeUses,1)
+    await request('/api/usage/translation',{method:'POST',body:{requestId:'post-transfer-request'},client:employee})
+    assert.equal((await request(`/api/stats?departmentId=p1&key=${month}`)).translationUses,1)
+    assert.equal((await request(`/api/stats?departmentId=p2&key=${month}`)).translationUses,1)
     assert.equal((await request(`/api/stats?key=${previousMonth}`)).departments.find(item=>item.id==='legacy').qaNativeUses,1)
   })
 
@@ -241,11 +241,14 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
   })
 
   await t.test('Public feedback is newest-first with three per page and super-only replies',async()=>{
-    for(let index=0;index<8;index++)await request('/api/feedback',{method:'POST',body:{content:`feedback-${index}`},client:employee})
+    for(let index=0;index<8;index++)await request('/api/feedback',{method:'POST',body:{content:`feedback-${index}`,authorName:'伪造姓名',authorDepartmentName:'伪造部门'},client:employee})
     const page1=await request('/api/feedback')
     assert.equal(page1.items.length,3)
     assert.equal(page1.total,8)
     assert.equal(page1.items[0].content,'feedback-7')
+    assert.equal(page1.items[0].authorName,'张明新姓名')
+    assert.equal(page1.items[0].authorDepartmentName,'制造二厂')
+    assert.equal(page1.items[0].authorDepartmentPath,'总公司 / 制造二厂')
     assert.equal((await request('/api/feedback?page=3')).items.length,2)
     await request(`/api/feedback/${page1.items[0].id}/reply`,{method:'PATCH',body:{reply:'forbidden'},client:employee,expected:403})
     await request(`/api/feedback/${page1.items[0].id}/reply`,{method:'PATCH',body:{reply:'fixture reply'},client:admin})
@@ -280,7 +283,8 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
   })
 
   await t.test('Password reset invalidates old sessions; assistant streaming remains available',async()=>{
-    const stream=await fetch(`${origin}/api/ragflow/chat/stream`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:employee.cookie},body:JSON.stringify({question:'fixture question'})})
+    await request('/api/usage/qa',{method:'POST',client:employee,expected:403})
+    const stream=await fetch(`${origin}/api/translate/chat/stream`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:employee.cookie},body:JSON.stringify({text:'fixture translation'})})
     assert.equal(stream.status,200)
     assert.ok((await stream.text()).includes('"type":"done"'))
     await request('/api/admin/users/mdm%3Ae1/reset-password',{method:'POST',client:admin})
@@ -299,7 +303,7 @@ test('Platform integration: migration, organization, accounts, roles, stats and 
     assert.equal(me.mustChangePassword,false)
     assert.equal(me.isSuperAdmin,false)
     assert.ok(me.roles.includes('glossary_admin'))
-    await request('/api/usage/qa',{method:'POST',client:portal,body:{requestId:'sso-usage-request'}})
+    await request('/api/usage/translation',{method:'POST',client:portal,body:{requestId:'sso-usage-request'}})
     await request('/api/admin/users',{client:portal,expected:403})
     const local={}
     assert.equal((await request('/api/login',{method:'POST',client:local,body:{username:'oa1001',password:'123456'}})).mustChangePassword,true)
