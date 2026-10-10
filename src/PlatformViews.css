@@ -1,5 +1,4 @@
 .topbar .nav button{font-size:13px;padding:7px 8px}.topbar .adminControls>button{font-size:13px;padding:7px 9px}.topbar .nav{gap:5px}.topbar .adminControls{gap:6px}
-.homeSection.assistantSection{background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;backdrop-filter:none;margin-top:0}
 .homeSection.usageSection{background:transparent;border:0;border-radius:0;box-shadow:none;backdrop-filter:none;padding:24px 0 0}
 .feedbackPanel{border-radius:0;border-left:0;border-right:0;box-shadow:none;backdrop-filter:none}.feedbackPanel .feedbackItem{background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;padding:14px 0;box-shadow:none}
 .usageHeading,.departmentChartHeading,.statisticsFooter,.permissionTitle,.platformTools,.syncSummary {display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
