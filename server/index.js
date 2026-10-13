@@ -27,6 +27,7 @@ import { Agent } from 'undici'
 import { callSharedModel, callSharedModelStream, callDocumentModel, documentModelState, configureDocumentModels, readModelAudit } from './model-client.js'
 import { createPlatform } from './platform.js'
 import {createGlossaryStore} from './glossary.js'
+import {createVersionNotes} from './version-notes.js'
 import {knowledgeAssistants} from './knowledge-assistants.js'
 import {createFormattedDocument,layoutContentMatches,markdownDocumentChunks} from './document-layout.js'
 import {concurrencyOptions,mapOrdered,validateConcurrencySettings} from './concurrency.js'
@@ -67,6 +68,8 @@ if(savedDocumentSettings) {
 }
 const glossary=createGlossaryStore({db,saveDatabase,storageDir})
 const platform = await createPlatform({ db, saveDatabase, session, storageDir })
+const versionNotes = createVersionNotes({db,saveDatabase,storageDir,decodeFilename:decodeUploadFilename})
+await versionNotes.ready
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -102,6 +105,7 @@ app.use(
 app.use(platform.attachUser)
 platform.registerRoutes(app)
 glossary.registerRoutes(app,platform)
+versionNotes.registerRoutes(app,platform)
 app.get('/api/translation/terminology-source.pdf',platform.requireUser,(_req,res,next)=>{
   res.type('application/pdf').set({'Content-Disposition':'inline; filename="SS020101-A3.pdf"','X-Content-Type-Options':'nosniff','Cache-Control':'private, max-age=3600'})
   res.sendFile(path.join(rootDir,'resources','standards','ss020101-a3.pdf'),error=>{if(error)next(Object.assign(new Error('术语来源文件不可用，请联系管理员检查发布资源'),{status:error.status||500}))})

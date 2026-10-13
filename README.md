@@ -117,6 +117,7 @@ Windows Nginx 发布使用完整预构建包，不需要在服务器执行 npm�
 - 词库文件：`storage/glossaries`
 - PDF 转换与中间文件：`storage/converted`
 - 翻译结果 Word：`storage/results`
+- 公开使用说明 PDF：`storage/version-notes`，对应 SQLite version_notes 记录，升级一起保留
 - 模型思考模式审计：`storage/logs/model-audit.log`
 - 人员、部门、用户角色、登录会话、同步记录与统计归档均保存于 `storage/aizhushou.sqlite`。
 - 首次账户升级前自动备份旧数据库：`storage/backups/`。
@@ -158,6 +159,12 @@ DOCX/PDF 翻译及 PDF 转 Word 的主下载是排版 Word，网页同时预览�
 这是逻辑结构恢复，不保证原文件的合并单元格、列宽、边框、分页和图片完全一致；公式保留文本，不承诺转为原生 Word 公式。低质量扫描件中无法确认的字符可能标记为“无法辨认”。标准解读一、二、三厂仍按原要求下载 Markdown 源文本 Word，未改为此排版流程。旧任务结果不自动重生成，请重新上传需要新版排版的文件。`.doc` 文件请先另存为 `.docx` 后上传。
 
 PDF 翻译和转换复用逐页识别：可提取文字不少于 80 字的页面使用文字层，其他页面渲染为图片交给共享模型识别（需内网模型支持图像输入）。文字较多但夹有图片的页面，图片内文字可能遗漏；DOCX 内图片尚未 OCR，下载也不保留原图，不支持图上原位替换英文。识别失败时任务明确失败，不继续生成假成功结果。
+
+## 首页版本说明
+
+首页最底部提供上传时间倒序、每页三条的版本说明，未登录访客也能新窗口预览 PDF。超级管理员手动填写版本号、上传实际 PDF（最大 200 MB），删除需要确认；其他管理角色不能操作。版本号不自动跟随 Git，同号发布不覆盖历史。初始不带样例或开发数据。
+
+`GET /api/version-notes` 与 `GET /api/version-notes/:id/pdf` 为公开列表及 inline/Range 预览；`POST /api/admin/version-notes` 和 `DELETE /api/admin/version-notes/:id` 在接收上传前校验超管。文件保留原显示名称、以 UUID 存储，验证真实 PDF、拒绝无法读取或需要密码的文件；发布/删除写入管理审计。删除标记先撤销访问，Windows 占用文件下次启动重试清理。说明可公开，勿上传敏感资料；术语来源 PDF 仍需要登录。
 
 ## 验证
 

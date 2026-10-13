@@ -35,6 +35,7 @@ import {
 import './App.css'
 import { Pagination, PermissionsCenter, UsageStatistics } from './PlatformViews.jsx'
 import GlossaryManager from './GlossaryManager.jsx'
+import VersionNotes from './VersionNotes.jsx'
 import {glossaryOptions} from './glossary-options.js'
 
 const anonymousUser = { authenticated: false, isAdmin: false, isSuperAdmin: false, permissions: [], roles: [], knowledgeAssistants: [] }
@@ -352,6 +353,7 @@ function HomeView({ statsRevision, feedback, feedbackPage, onFeedbackPage, isAdm
           onReplySaved={onReplySaved}
           setNotice={setNotice}
         />
+      <VersionNotes api={api} Dialog={Dialog} isSuperAdmin={isAdmin} setNotice={setNotice}/>
     </>
   )
 }
